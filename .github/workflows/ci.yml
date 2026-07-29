@@ -41,9 +41,9 @@ jobs:
       - name: Verify cross-build environment
         run: make doctor-runtime
       - name: Configure runtime
-        run: >-
-          cmake -S runtime -B runtime/build-ci
-          -DCMAKE_TOOLCHAIN_FILE=runtime/cmake/toolchains/mingw-x86_64.cmake
-          -DCMAKE_BUILD_TYPE=Release
+        run: |
+          cmake -S runtime -B runtime/build-ci \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/runtime/cmake/toolchains/mingw-x86_64.cmake" \
+            -DCMAKE_BUILD_TYPE=Release
       - name: Build runtime and smoke executables
         run: cmake --build runtime/build-ci --parallel

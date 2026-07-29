@@ -167,7 +167,7 @@ To build without running Wine:
 
 ```sh
 cmake -S runtime -B runtime/build \
-  -DCMAKE_TOOLCHAIN_FILE=runtime/cmake/toolchains/mingw-x86_64.cmake \
+  -DCMAKE_TOOLCHAIN_FILE="$PWD/runtime/cmake/toolchains/mingw-x86_64.cmake" \
   -DCMAKE_BUILD_TYPE=Release
 cmake --build runtime/build --parallel
 ```

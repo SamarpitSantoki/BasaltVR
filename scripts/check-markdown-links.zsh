@@ -6,7 +6,7 @@ readonly script_dir=${0:A:h}
 readonly repo_dir=${script_dir:h}
 cd "$repo_dir"
 
-documents=("${(@f)$(rg --files -g '*.md' -g '!runtime/build/**' -g '!streamer/.build/**')}")
+documents=("${(@f)$(git ls-files --cached --others --exclude-standard -- '*.md')}")
 failures=()
 
 while IFS=$'\t' read -r document link; do

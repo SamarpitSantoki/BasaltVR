@@ -2,6 +2,7 @@ SHELL := /bin/zsh
 .DEFAULT_GOAL := help
 
 VERSION ?= 0.1.0
+REPO_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 
 .PHONY: help doctor doctor-runtime doctor-dxmt check test build app runtime-build runtime-test dxmt-test release
 
@@ -31,7 +32,7 @@ app: build ## Run the management app from source.
 
 runtime-build: ## Cross-build the Windows OpenXR runtime without running Wine.
 	@cmake -S runtime -B runtime/build \
-		-DCMAKE_TOOLCHAIN_FILE=runtime/cmake/toolchains/mingw-x86_64.cmake \
+		-DCMAKE_TOOLCHAIN_FILE="$(REPO_DIR)/runtime/cmake/toolchains/mingw-x86_64.cmake" \
 		-DCMAKE_BUILD_TYPE=Release
 	@cmake --build runtime/build --parallel
 
