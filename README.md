@@ -1,5 +1,7 @@
 # BasaltVR
 
+Basically a vibecoded clone of MoltenVR. Only tested on steam beatsaber + bsmanager. Hardware tested: M3 Max, Quest 3+ALVr. Runs windows vr programs on mac.
+
 **A clean-room, open-source PCVR streaming stack for Apple Silicon Macs.**
 
 *(Basalt is what molten rock becomes when it cools down and solidifies in the open.)*
