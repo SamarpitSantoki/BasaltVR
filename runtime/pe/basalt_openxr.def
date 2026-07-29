@@ -1,0 +1,3 @@
+LIBRARY basalt_openxr
+EXPORTS
+    xrNegotiateLoaderRuntimeInterface

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>BasaltVR</string>
+    <key>CFBundleExecutable</key>
+    <string>BasaltVRLauncher</string>
+    <key>CFBundleIconFile</key>
+    <string>BasaltVR.icns</string>
+    <key>CFBundleIdentifier</key>
+    <string>org.basaltvr.manager</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>BasaltVR</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2026 BasaltVR contributors</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>LSArchitecturePriority</key>
+    <array>
+        <string>arm64</string>
+    </array>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>BasaltVR captures game audio from your selected loopback device and streams it to your VR headset.</string>
+</dict>
+</plist>

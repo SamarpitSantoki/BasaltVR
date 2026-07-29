@@ -1,0 +1,41 @@
+From: BasaltVR build <build@basaltvr.invalid>
+Subject: [PATCH] d3d11: force Unity OpenXR multipass for 2D IOSurface swapchains
+
+Basalt's native handoff intentionally exposes one simple IOSurface-backed 2D
+swapchain per eye and rejects texture arrays. If DXMT advertises
+VPAndRTArrayIndexFromAnyShaderFeedingRasterizer, Unity retains Single Pass
+Instanced shaders after the array swapchain rejection. Eye-indexed fullscreen
+lighting and fog then render in only one eye.
+
+Report the capability conservatively. Unity's OpenXR provider consequently
+uses its documented multipass fallback, matching Basalt's independent 2D eye
+surfaces.
+---
+ src/d3d11/d3d11_inspection.cpp | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/src/d3d11/d3d11_inspection.cpp b/src/d3d11/d3d11_inspection.cpp
+index be6c235..0380508 100644
+--- a/src/d3d11/d3d11_inspection.cpp
++++ b/src/d3d11/d3d11_inspection.cpp
+@@ -59,7 +59,17 @@ MTLD3D11Device::MTLD3D11Device() {
+   m_d3d11Options.OutputMergerLogicOp = TRUE;
+ #endif
+ 
+-  m_d3d11Options3.VPAndRTArrayIndexFromAnyShaderFeedingRasterizer = TRUE;
++  /*
++   * Basalt exports simple IOSurface-backed 2D swapchains and deliberately
++   * rejects texture-array OpenXR swapchains. Advertising arbitrary-stage
++   * render-target-array indexing makes Unity keep Single Pass Instanced
++   * shaders even after that rejection. Full-screen lighting and fog passes
++   * then receive a valid stereo eye index only for one eye.
++   *
++   * Report the capability conservatively so Unity's OpenXR provider selects
++   * its supported multipass path, with one independent draw per eye.
++   */
++  m_d3d11Options3.VPAndRTArrayIndexFromAnyShaderFeedingRasterizer = FALSE;
+ 
+   m_d3d11Options5.SharedResourceTier = D3D11_SHARED_RESOURCE_TIER_0; // TODO
+ 
+-- 
+2.50.1

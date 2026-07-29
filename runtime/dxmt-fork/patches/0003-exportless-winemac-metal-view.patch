@@ -1,0 +1,85 @@
+diff --git a/src/winemetal/unix/winemetal_unix.c b/src/winemetal/unix/winemetal_unix.c
+index 0042c6e..e86df4e 100644
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -1573,6 +1573,58 @@ struct macdrv_functions_t {
+   void (*on_main_thread)(dispatch_block_t b);
+ };
+ 
++/*
++ * Upstream Wine's mac driver deliberately hides the private window helpers
++ * used by DXMT's patched Wine build.  Keep the fast, HWND-exact bridge when
++ * those helpers exist, but provide a normal AppKit view for single-window
++ * game processes (Unity's player/mirror window) when they do not.
++ */
++@interface DXMTFallbackMetalView : NSView
++@end
++
++@implementation DXMTFallbackMetalView
++@end
++
++static NSWindow *
++fallback_metal_window(void) {
++  NSWindow *window = [NSApp keyWindow];
++  if (!window)
++    window = [NSApp mainWindow];
++  if (window)
++    return window;
++
++  for (NSWindow *candidate in [NSApp orderedWindows]) {
++    if (candidate.contentView && candidate.isVisible)
++      return candidate;
++  }
++  for (NSWindow *candidate in [NSApp windows]) {
++    if (candidate.contentView)
++      return candidate;
++  }
++  return nil;
++}
++
++static void
++create_fallback_metal_view(struct unixcall_create_metal_view_from_hwnd *params) {
++  execute_on_main(^{
++    NSWindow *window = fallback_metal_window();
++    NSView *content = window.contentView;
++    if (!content)
++      return;
++
++    DXMTFallbackMetalView *view =
++        [[DXMTFallbackMetalView alloc] initWithFrame:content.bounds];
++    view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
++    view.wantsLayer = YES;
++    CAMetalLayer *layer = [CAMetalLayer layer];
++    layer.device = (id<MTLDevice>)params->device;
++    view.layer = layer;
++    [content addSubview:view positioned:NSWindowAbove relativeTo:nil];
++    params->ret_view = (obj_handle_t)view;
++    params->ret_layer = (obj_handle_t)layer;
++  });
++}
++
+ static NTSTATUS
+ _CreateMetalViewFromHWND(void *obj) {
+   struct unixcall_create_metal_view_from_hwnd *params = obj;
+@@ -1605,6 +1657,8 @@ _CreateMetalViewFromHWND(void *obj) {
+       params->ret_layer = (obj_handle_t)pfn_macdrv_view_get_metal_layer(view);
+     }
+     pfn_release_win_data(win_data);
++  } else {
++    create_fallback_metal_view(params);
+   }
+ 
+   return STATUS_SUCCESS;
+@@ -1625,6 +1679,12 @@ _ReleaseMetalView(void *obj) {
+ 
+   if (pfn_macdrv_view_release_metal_view)
+     pfn_macdrv_view_release_metal_view((macdrv_metal_view)params->handle);
++  else if ([(id)params->handle isKindOfClass:[DXMTFallbackMetalView class]])
++    execute_on_main(^{
++      DXMTFallbackMetalView *view = (DXMTFallbackMetalView *)params->handle;
++      [view removeFromSuperview];
++      [view release];
++    });
+ 
+   return STATUS_SUCCESS;
+ }

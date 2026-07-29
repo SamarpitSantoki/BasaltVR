@@ -1,0 +1,356 @@
+import XCTest
+@testable import BasaltCore
+
+final class AlvrVideoStreamTests: XCTestCase {
+    private static func appendLittleEndian<T: FixedWidthInteger>(_ value: T, to data: inout Data) {
+        var value = value.littleEndian
+        withUnsafeBytes(of: &value) { data.append(contentsOf: $0) }
+    }
+
+    private static func duration(seconds: UInt64, nanoseconds: UInt32) -> Data {
+        var data = Data()
+        appendLittleEndian(seconds, to: &data)
+        appendLittleEndian(nanoseconds, to: &data)
+        return data
+    }
+
+    private static func uplinkDatagram(streamID: UInt16, payload: Data,
+                                       shardCount: UInt32 = 1) -> Data {
+        var result = Data(repeating: 0, count: 18)
+        result.append(payload)
+        func write<T: FixedWidthInteger>(_ value: T, at offset: Int) {
+            var value = value.bigEndian
+            withUnsafeBytes(of: &value) {
+                result.replaceSubrange(offset..<offset + $0.count, with: $0)
+            }
+        }
+        write(UInt32(result.count - 4), at: 0)
+        write(streamID, at: 4)
+        write(UInt32(7), at: 6)
+        write(shardCount, at: 10)
+        write(UInt32(0), at: 14)
+        return result
+    }
+
+    func testDecodesTrackingTimestampAndClientStatistics() throws {
+        let tracking = Self.uplinkDatagram(
+            streamID: 0,
+            payload: Self.duration(seconds: 12, nanoseconds: 345))
+        XCTAssertEqual(try AlvrUplinkPacketDecoder.decode(tracking),
+                       .tracking(timestampNanoseconds: 12_000_000_345, headPose: nil,
+                                 leftController: nil, rightController: nil,
+                                 controllerMask: 0))
+
+        var statisticsPayload = Data()
+        for value: UInt32 in [1, 14_000_000, 5_000_000, 2_000_000,
+                              3_000_000, 6_000_000, 40_000_000] {
+            statisticsPayload.append(Self.duration(seconds: 0, nanoseconds: value))
+        }
+        let statisticsPacket = Self.uplinkDatagram(streamID: 4, payload: statisticsPayload)
+        guard case .statistics(let statistics) =
+                try AlvrUplinkPacketDecoder.decode(statisticsPacket) else {
+            return XCTFail("Expected ALVR client statistics")
+        }
+        XCTAssertEqual(statistics.targetTimestampNanoseconds, 1)
+        XCTAssertEqual(statistics.frameIntervalNanoseconds, 14_000_000)
+        XCTAssertEqual(statistics.videoDecodeNanoseconds, 5_000_000)
+        XCTAssertEqual(statistics.videoDecoderQueueNanoseconds, 2_000_000)
+        XCTAssertEqual(statistics.totalPipelineLatencyNanoseconds, 40_000_000)
+    }
+
+    func testDecodesHeadPoseFromFirstTrackingMotion() throws {
+        var payload = Self.duration(seconds: 2, nanoseconds: 3)
+        Self.appendLittleEndian(UInt64(1), to: &payload) // device motion count
+        Self.appendLittleEndian(UInt64(0x5b90_853d_c920_2538), to: &payload) // HEAD id
+        for value: Float in [0, 0.258819, 0, 0.965926, 1, 2, 3, 0, 0, 0, 0, 0, 0] {
+            Self.appendLittleEndian(value.bitPattern, to: &payload)
+        }
+        let packet = Self.uplinkDatagram(streamID: 0, payload: payload)
+        guard case .tracking(let timestamp, let pose?, _, _, let mask) =
+                try AlvrUplinkPacketDecoder.decode(packet) else {
+            return XCTFail("Expected tracking pose")
+        }
+        XCTAssertEqual(timestamp, 2_000_000_003)
+        XCTAssertEqual(pose.orientationY, 0.258819, accuracy: 0.000001)
+        XCTAssertEqual(pose.orientationW, 0.965926, accuracy: 0.000001)
+        XCTAssertEqual(pose.positionX, 1)
+        XCTAssertEqual(pose.positionY, 2)
+        XCTAssertEqual(pose.positionZ, 3)
+        XCTAssertEqual(mask, 0)
+    }
+
+    func testDecodesControllerMotionsByDeviceID() throws {
+        var payload = Self.duration(seconds: 3, nanoseconds: 4)
+        Self.appendLittleEndian(UInt64(2), to: &payload)
+
+        func appendMotion(id: UInt64, position: (Float, Float, Float),
+                          velocity: (Float, Float, Float)) {
+            Self.appendLittleEndian(id, to: &payload)
+            let values: [Float] = [
+                0, 0, 0, 1, position.0, position.1, position.2,
+                velocity.0, velocity.1, velocity.2, 0.1, 0.2, 0.3,
+            ]
+            for value in values { Self.appendLittleEndian(value.bitPattern, to: &payload) }
+        }
+
+        // Reverse the normal left/right order to prove IDs, not indices, are used.
+        appendMotion(id: 0xf6b8_1330_eb3d_bdd8, position: (1, 2, 3),
+                     velocity: (4, 5, 6))
+        appendMotion(id: 0xe521_d8da_be2d_07a2, position: (-1, -2, -3),
+                     velocity: (-4, -5, -6))
+
+        let packet = Self.uplinkDatagram(streamID: 0, payload: payload)
+        guard case .tracking(let timestamp, _, let left?, let right?, let mask) =
+                try AlvrUplinkPacketDecoder.decode(packet) else {
+            return XCTFail("Expected both controller motions")
+        }
+        XCTAssertEqual(timestamp, 3_000_000_004)
+        XCTAssertEqual(left.pose.positionX, -1)
+        XCTAssertEqual(left.linearVelocityZ, -6)
+        XCTAssertEqual(right.pose.positionZ, 3)
+        XCTAssertEqual(right.angularVelocityY, 0.2, accuracy: 0.000001)
+        XCTAssertEqual(mask, 3)
+    }
+
+    func testDecodesControllerPrefixFromShardedTrackingVector() throws {
+        var payload = Self.duration(seconds: 4, nanoseconds: 5)
+        Self.appendLittleEndian(UInt64(20), to: &payload) // body motions continue later
+        for (id, x) in [
+            (UInt64(0x5b90_853d_c920_2538), Float(0)),
+            (UInt64(0xe521_d8da_be2d_07a2), Float(-0.2)),
+            (UInt64(0xf6b8_1330_eb3d_bdd8), Float(0.2)),
+        ] {
+            Self.appendLittleEndian(id, to: &payload)
+            for value: Float in [0, 0, 0, 1, x, 1.2, -0.4, 0, 0, 0, 0, 0, 0] {
+                Self.appendLittleEndian(value.bitPattern, to: &payload)
+            }
+        }
+        let packet = Self.uplinkDatagram(
+            streamID: 0, payload: payload, shardCount: 2)
+        guard case .tracking(_, let head?, let left?, let right?, let mask) =
+                try AlvrUplinkPacketDecoder.decode(packet) else {
+            return XCTFail("Expected the complete HMD/controller prefix")
+        }
+        XCTAssertEqual(head.positionY, 1.2)
+        XCTAssertEqual(left.pose.positionX, -0.2)
+        XCTAssertEqual(right.pose.positionX, 0.2)
+        XCTAssertEqual(mask, 3)
+    }
+
+    func testControllerMaskReflectsMissingHandByDeviceID() throws {
+        var payload = Self.duration(seconds: 5, nanoseconds: 6)
+        Self.appendLittleEndian(UInt64(2), to: &payload)
+        for id in [UInt64(0x5b90_853d_c920_2538),
+                   UInt64(0xf6b8_1330_eb3d_bdd8)] {
+            Self.appendLittleEndian(id, to: &payload)
+            for value: Float in [0, 0, 0, 1, 0, 1, -0.4, 0, 0, 0, 0, 0, 0] {
+                Self.appendLittleEndian(value.bitPattern, to: &payload)
+            }
+        }
+
+        guard case .tracking(_, _, nil, let right?, let mask) =
+                try AlvrUplinkPacketDecoder.decode(
+                    Self.uplinkDatagram(streamID: 0, payload: payload)) else {
+            return XCTFail("Expected only the right controller")
+        }
+        XCTAssertEqual(right.pose.positionY, 1)
+        XCTAssertEqual(mask, 2)
+    }
+
+    func testSendsPacketizedVideoOverUDP() throws {
+        let receiver = socket(AF_INET, SOCK_DGRAM, 0)
+        XCTAssertGreaterThanOrEqual(receiver, 0)
+        defer { close(receiver) }
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = 0
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let bindResult = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(receiver, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        XCTAssertEqual(bindResult, 0)
+        var bound = sockaddr_in()
+        var boundSize = socklen_t(MemoryLayout<sockaddr_in>.size)
+        withUnsafeMutablePointer(to: &bound) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                _ = getsockname(receiver, $0, &boundSize)
+            }
+        }
+        var timeout = timeval(tv_sec: 2, tv_usec: 0)
+        setsockopt(receiver, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                   socklen_t(MemoryLayout<timeval>.size))
+
+        let sender = try AlvrVideoStreamSender(
+            host: "127.0.0.1", remotePort: UInt16(bigEndian: bound.sin_port), localPort: 0)
+        sender.send(annexB: Data([0, 0, 0, 1, 0x65]),
+                    timestampNanoseconds: 1, isIDR: true)
+
+        var buffer = [UInt8](repeating: 0, count: 2_048)
+        let count = recv(receiver, &buffer, buffer.count, 0)
+        XCTAssertGreaterThan(count, 18)
+        XCTAssertEqual(Data(buffer[4..<6]), Data([0, 3]))
+        XCTAssertEqual(Data(buffer[10..<14]), Data([0, 0, 0, 1]))
+    }
+
+    func testSendsAndReceivesLengthFramedStreamPacketsOverTCP() throws {
+        let listener = socket(AF_INET, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(listener, 0)
+        defer { close(listener) }
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = 0
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let bindResult = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(listener, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        XCTAssertEqual(bindResult, 0)
+        XCTAssertEqual(listen(listener, 1), 0)
+        var bound = sockaddr_in()
+        var boundSize = socklen_t(MemoryLayout<sockaddr_in>.size)
+        withUnsafeMutablePointer(to: &bound) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                _ = getsockname(listener, $0, &boundSize)
+            }
+        }
+
+        let sender = try AlvrVideoStreamSender(
+            host: "127.0.0.1", remotePort: UInt16(bigEndian: bound.sin_port),
+            localPort: 0, transport: .tcp)
+        XCTAssertEqual(sender.transport, .tcp)
+        let peer = accept(listener, nil, nil)
+        XCTAssertGreaterThanOrEqual(peer, 0)
+        defer { close(peer) }
+        var timeout = timeval(tv_sec: 2, tv_usec: 0)
+        setsockopt(peer, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                   socklen_t(MemoryLayout<timeval>.size))
+
+        let reportReceived = expectation(description: "completed access-unit report")
+        sender.onFrameSent = { report in
+            XCTAssertEqual(report.timestampNanoseconds, 1)
+            XCTAssertEqual(report.accessUnitBytes, 5)
+            XCTAssertGreaterThan(report.wireBytes, report.accessUnitBytes)
+            XCTAssertEqual(report.shardCount, 1)
+            XCTAssertTrue(report.isIDR)
+            XCTAssertGreaterThan(report.durationNanoseconds, 0)
+            reportReceived.fulfill()
+        }
+        sender.send(annexB: Data([0, 0, 0, 1, 0x65]),
+                    timestampNanoseconds: 1, isIDR: true)
+        let prefix = try readExactly(4, from: peer)
+        let payloadLength = prefix.reduce(0) { ($0 << 8) | Int($1) }
+        let payload = try readExactly(payloadLength, from: peer)
+        XCTAssertEqual(payload.prefix(2), Data([0, 3]))
+        XCTAssertEqual(payload[6..<10], Data([0, 0, 0, 1]))
+
+        let pcm = Data([0x00, 0x80, 0xff, 0x7f])
+        XCTAssertTrue(sender.sendAudioPCM16(pcm))
+        let audioPrefix = try readExactly(4, from: peer)
+        let audioPayloadLength = audioPrefix.reduce(0) { ($0 << 8) | Int($1) }
+        let audioPayload = try readExactly(audioPayloadLength, from: peer)
+        XCTAssertEqual(audioPayload.prefix(2), Data([0, 2]))
+        XCTAssertEqual(audioPayload[2..<6], Data([0, 0, 0, 0]))
+        XCTAssertEqual(audioPayload[6..<10], Data([0, 0, 0, 1]))
+        XCTAssertEqual(audioPayload[10..<14], Data([0, 0, 0, 0]))
+        XCTAssertEqual(audioPayload[14...], pcm)
+
+        let questTimestamp: UInt64 = 12_000_000_345
+        let tracking = Self.uplinkDatagram(
+            streamID: 0,
+            payload: Self.duration(seconds: 12, nanoseconds: 345))
+        tracking.withUnsafeBytes {
+            XCTAssertEqual(Darwin.send(peer, $0.baseAddress, tracking.count, 0), tracking.count)
+        }
+        let deadline = Date().addingTimeInterval(1)
+        var videoTimestamp: UInt64?
+        while videoTimestamp == nil, Date() < deadline {
+            videoTimestamp = sender.timestampForVideoFrame()
+            usleep(1_000)
+        }
+        XCTAssertEqual(videoTimestamp, questTimestamp)
+        XCTAssertEqual(sender.timestampForVideoFrame(), questTimestamp)
+        wait(for: [reportReceived], timeout: 1)
+    }
+
+    func testWiredBufferPolicyCanHoldAnIDRWithoutGrowingUDPQueue() {
+        XCTAssertEqual(AlvrVideoStreamSender.udpSendBufferBytes, 64 * 1_024)
+        XCTAssertEqual(AlvrVideoStreamSender.tcpSendBufferBytes, 1 * 1_024 * 1_024)
+        XCTAssertEqual(AlvrVideoStreamSender.tcpReceiveBufferBytes, 1 * 1_024 * 1_024)
+        XCTAssertGreaterThan(AlvrVideoStreamSender.tcpSendBufferBytes,
+                             AlvrVideoStreamSender.udpSendBufferBytes)
+        XCTAssertEqual(AlvrVideoStreamSender.tcpAccessUnitDeadlineNanoseconds,
+                       50_000_000)
+    }
+
+    func testWiredAccessUnitTimeoutFailsConnectionInsteadOfReusingPartialStream() throws {
+        let listener = socket(AF_INET, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(listener, 0)
+        defer { close(listener) }
+        var receiveBuffer: Int32 = 4 * 1_024
+        setsockopt(listener, SOL_SOCKET, SO_RCVBUF, &receiveBuffer,
+                   socklen_t(MemoryLayout<Int32>.size))
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = 0
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let bindResult = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(listener, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        XCTAssertEqual(bindResult, 0)
+        XCTAssertEqual(listen(listener, 1), 0)
+        var bound = sockaddr_in()
+        var boundSize = socklen_t(MemoryLayout<sockaddr_in>.size)
+        withUnsafeMutablePointer(to: &bound) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                _ = getsockname(listener, $0, &boundSize)
+            }
+        }
+
+        let sender = try AlvrVideoStreamSender(
+            host: "127.0.0.1", remotePort: UInt16(bigEndian: bound.sin_port),
+            localPort: 0, transport: .tcp)
+        let peer = accept(listener, nil, nil)
+        XCTAssertGreaterThanOrEqual(peer, 0)
+        defer { close(peer) }
+
+        let failed = expectation(description: "whole access-unit write timed out")
+        sender.onError = { error in
+            XCTAssertTrue(error.localizedDescription.contains("access unit"))
+            failed.fulfill()
+        }
+        XCTAssertTrue(sender.send(
+            annexB: Data(repeating: 0x55, count: 8 * 1_024 * 1_024),
+            timestampNanoseconds: 1, isIDR: true))
+        wait(for: [failed], timeout: 2)
+
+        // Once any TCP frame is partial, sending another frame would corrupt
+        // the stream. The sender remains failed until the session reconnects.
+        XCTAssertFalse(sender.send(
+            annexB: Data([0, 0, 0, 1, 0x41]),
+            timestampNanoseconds: 2, isIDR: false))
+    }
+
+    private func readExactly(_ count: Int, from socket: Int32) throws -> Data {
+        var result = Data(count: count)
+        var offset = 0
+        while offset < count {
+            let received = result.withUnsafeMutableBytes {
+                recv(socket, $0.baseAddress!.advanced(by: offset), count - offset, 0)
+            }
+            guard received > 0 else { throw BasaltError("Loopback TCP peer closed") }
+            offset += received
+        }
+        return result
+    }
+}

@@ -1,0 +1,310 @@
+#!/bin/zsh
+
+set -euo pipefail
+
+script_dir=${0:A:h}
+runtime_dir=${script_dir:h}
+build_dir=${BUILD_DIR:-${runtime_dir}/build}
+toolchain_file=${runtime_dir}/cmake/toolchains/mingw-x86_64.cmake
+
+readonly wine_version=11.10
+readonly wine_archive_name=wine-devel-11.10-osx64.tar.xz
+readonly wine_url=https://github.com/Gcenx/macOS_Wine_builds/releases/download/11.10/${wine_archive_name}
+readonly wine_sha256=6d0637c3526fbe7051a5f8968dbde68fbc3ac417717648b9331c46642b52173b
+
+readonly dxmt_version=v0.80
+readonly dxmt_archive_name=dxmt-v0.80-builtin.tar.gz
+readonly dxmt_url=https://github.com/3Shain/dxmt/releases/download/v0.80/${dxmt_archive_name}
+readonly dxmt_sha256=8f260e36b5739e68f3bad613381441385c4dc7b85b78ba8de653d5a6a264529d
+
+artifact_dir=${build_dir}/dxmt/artifacts
+toolchain_dir=${build_dir}/dxmt/toolchain
+probe_dir=${build_dir}/dxmt/probe
+wine_extract_dir=${toolchain_dir}/wine-${wine_version}
+dxmt_extract_dir=${toolchain_dir}/dxmt-${dxmt_version}
+wine_root=${wine_extract_dir}/Wine\ Devel.app/Contents/Resources/wine
+dxmt_root=${dxmt_extract_dir}/${dxmt_version}
+
+# Intentionally ignore ambient Wine/OpenXR settings. This prefix is disposable and
+# never points at Whisky, CrossOver, or a game bottle unless explicitly overridden.
+wine_prefix=${BASALT_DXMT_WINEPREFIX:-${build_dir}/dxmt/prefix-wine-${wine_version}-dxmt-${dxmt_version}}
+unset WINEPREFIX WINEDLLPATH WINEDLLOVERRIDES XR_RUNTIME_JSON
+
+cmake_bin=${CMAKE:-$(command -v cmake || true)}
+curl_bin=$(command -v curl || true)
+shasum_bin=$(command -v shasum || true)
+tar_bin=$(command -v tar || true)
+
+if [[ -z ${cmake_bin} || -z ${curl_bin} || -z ${shasum_bin} || -z ${tar_bin} ]]; then
+    print -u2 "Missing CMake, curl, shasum, or tar. See runtime/README.md."
+    exit 1
+fi
+
+if [[ $(uname -m) == arm64 ]] && ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+    print -u2 "Rosetta 2 is required to run the x86-64 Wine bundle."
+    exit 1
+fi
+
+sha256_file() {
+    "${shasum_bin}" -a 256 "$1" | awk '{print $1}'
+}
+
+download_verified() {
+    local url=$1
+    local destination=$2
+    local expected=$3
+
+    if [[ -f ${destination} ]]; then
+        local existing
+        existing=$(sha256_file "${destination}")
+        if [[ ${existing} != ${expected} ]]; then
+            print -u2 "FAIL: existing artifact has the wrong SHA-256: ${destination}"
+            print -u2 "      expected ${expected}"
+            print -u2 "      actual   ${existing}"
+            exit 1
+        fi
+        print "Using verified ${destination:t}"
+        return
+    fi
+
+    local partial=${destination}.partial.$$
+    "${curl_bin}" --fail --location --progress-bar --output "${partial}" "${url}"
+
+    local actual
+    actual=$(sha256_file "${partial}")
+    if [[ ${actual} != ${expected} ]]; then
+        print -u2 "FAIL: downloaded artifact has the wrong SHA-256: ${destination:t}"
+        print -u2 "      expected ${expected}"
+        print -u2 "      actual   ${actual}"
+        exit 1
+    fi
+    mv "${partial}" "${destination}"
+}
+
+mkdir -p "${artifact_dir}" "${toolchain_dir}" "${probe_dir}" "${wine_prefix}"
+
+wine_archive=${artifact_dir}/${wine_archive_name}
+dxmt_archive=${artifact_dir}/${dxmt_archive_name}
+download_verified "${wine_url}" "${wine_archive}" "${wine_sha256}"
+download_verified "${dxmt_url}" "${dxmt_archive}" "${dxmt_sha256}"
+
+if [[ ! -x ${wine_root}/bin/wine ]]; then
+    mkdir -p "${wine_extract_dir}"
+    "${tar_bin}" -xJf "${wine_archive}" -C "${wine_extract_dir}"
+fi
+if [[ ! -f ${dxmt_root}/x86_64-windows/d3d11.dll ]]; then
+    mkdir -p "${dxmt_extract_dir}"
+    "${tar_bin}" -xzf "${dxmt_archive}" -C "${dxmt_extract_dir}"
+fi
+
+if [[ $(${wine_root}/bin/wine --version) != wine-${wine_version} ]]; then
+    print -u2 "FAIL: extracted Wine does not report wine-${wine_version}"
+    exit 1
+fi
+
+# v0.80 is the official DXMT built-in layout. Overlay only this generated Wine
+# extraction; no installed app or user bottle is changed.
+for dll in d3d10core.dll d3d11.dll dxgi.dll winemetal.dll; do
+    cp "${dxmt_root}/x86_64-windows/${dll}" \
+        "${wine_root}/lib/wine/x86_64-windows/${dll}"
+done
+cp "${dxmt_root}/x86_64-unix/winemetal.so" \
+    "${wine_root}/lib/wine/x86_64-unix/winemetal.so"
+
+configure_args=(
+    -S "${runtime_dir}"
+    -B "${build_dir}"
+    -DCMAKE_BUILD_TYPE=Release
+)
+if [[ ! -f ${build_dir}/CMakeCache.txt ]]; then
+    configure_args+=("-DCMAKE_TOOLCHAIN_FILE=${toolchain_file}")
+fi
+"${cmake_bin}" "${configure_args[@]}"
+"${cmake_bin}" --build "${build_dir}" --parallel --target \
+    basalt_openxr \
+    d3d11_runtime_smoke \
+    dxmt_shared_texture_probe \
+    dxmt_fence_probe \
+    dxmt_window_swapchain_probe \
+    dxmt_iosurface_probe \
+    dxmt_iosurface_pixel_source \
+    frame_timer_probe \
+    steamwebhelper_compat
+
+# Keep the executable in a clean directory so an unrelated d3d11.dll beside the
+# main build output cannot shadow the pinned DXMT installation.
+cp "${build_dir}/bin/dxmt_shared_texture_probe.exe" "${probe_dir}/dxmt_shared_texture_probe.exe"
+cp "${build_dir}/bin/dxmt_fence_probe.exe" "${probe_dir}/dxmt_fence_probe.exe"
+cp "${build_dir}/bin/dxmt_window_swapchain_probe.exe" "${probe_dir}/dxmt_window_swapchain_probe.exe"
+cp "${build_dir}/bin/dxmt_iosurface_probe.exe" "${probe_dir}/dxmt_iosurface_probe.exe"
+cp "${build_dir}/bin/dxmt_iosurface_pixel_source.exe" "${probe_dir}/dxmt_iosurface_pixel_source.exe"
+cp "${build_dir}/bin/d3d11_runtime_smoke.exe" "${probe_dir}/d3d11_runtime_smoke.exe"
+cp "${build_dir}/bin/frame_timer_probe.exe" "${probe_dir}/frame_timer_probe.exe"
+
+# An already-created disposable prefix may contain older generated built-ins.
+# Keep its Windows view in sync with the overlay before running the probe.
+system32=${wine_prefix}/drive_c/windows/system32
+if [[ -d ${system32} ]]; then
+    for dll in d3d10core.dll d3d11.dll dxgi.dll winemetal.dll; do
+        cp "${dxmt_root}/x86_64-windows/${dll}" "${system32}/${dll}"
+    done
+fi
+
+cleanup() {
+    WINEPREFIX=${wine_prefix} "${wine_root}/bin/wineserver" -k >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
+
+pushd "${probe_dir}" >/dev/null
+WINEPREFIX=${wine_prefix} \
+WINEARCH=win64 \
+WINEDEBUG=-all \
+MVK_CONFIG_LOG_LEVEL=0 \
+    "${wine_root}/bin/wine" ./dxmt_shared_texture_probe.exe
+
+WINEPREFIX=${wine_prefix} \
+WINEARCH=win64 \
+WINEDEBUG=-all \
+MVK_CONFIG_LOG_LEVEL=0 \
+    "${wine_root}/bin/wine" ./dxmt_fence_probe.exe
+
+WINEPREFIX=${wine_prefix} \
+WINEARCH=win64 \
+WINEDEBUG=-all \
+    "${wine_root}/bin/wine" ./frame_timer_probe.exe
+
+# Stock DXMT must not expose the Basalt IOSurface private data.
+WINEPREFIX=${wine_prefix} \
+WINEARCH=win64 \
+WINEDEBUG=-all \
+MVK_CONFIG_LOG_LEVEL=0 \
+    "${wine_root}/bin/wine" ./dxmt_iosurface_probe.exe
+
+manifest=${build_dir}/bin/basalt_openxr.json
+manifest_windows="Z:${manifest//\//\\}"
+WINEPREFIX=${wine_prefix} WINEDEBUG=-all \
+    "${wine_root}/bin/wine" reg.exe add \
+    'HKLM\Software\Khronos\OpenXR\1' \
+    /v ActiveRuntime /t REG_SZ /d "${manifest_windows}" /f
+WINEPREFIX=${wine_prefix} \
+WINEDEBUG=-all \
+MVK_CONFIG_LOG_LEVEL=0 \
+    "${wine_root}/bin/wine" ./d3d11_runtime_smoke.exe
+
+# --- Basalt DXMT fork phase (runs when build-dxmt-fork.zsh has produced it) --
+fork_install=${build_dir}/dxmt/fork-install
+if [[ -f ${fork_install}/x86_64-windows/d3d11.dll && -f ${fork_install}/x86_64-unix/winemetal.so ]]; then
+    overlay_dxmt() {
+        local source_windows=$1
+        local source_unix=$2
+        for dll in d3d10core.dll d3d11.dll dxgi.dll winemetal.dll; do
+            cp "${source_windows}/${dll}" "${wine_root}/lib/wine/x86_64-windows/${dll}"
+            cp "${source_windows}/${dll}" "${system32:-${wine_prefix}/drive_c/windows/system32}/${dll}"
+        done
+        cp "${source_unix}/winemetal.so" "${wine_root}/lib/wine/x86_64-unix/winemetal.so"
+    }
+    system32=${wine_prefix}/drive_c/windows/system32
+    overlay_dxmt "${fork_install}/x86_64-windows" "${fork_install}/x86_64-unix"
+
+    # Fork with the gate off must be indistinguishable from stock.
+    WINEPREFIX=${wine_prefix} WINEARCH=win64 WINEDEBUG=-all MVK_CONFIG_LOG_LEVEL=0 \
+        "${wine_root}/bin/wine" ./dxmt_iosurface_probe.exe
+    WINEPREFIX=${wine_prefix} WINEARCH=win64 WINEDEBUG=-all MVK_CONFIG_LOG_LEVEL=0 \
+        "${wine_root}/bin/wine" ./dxmt_shared_texture_probe.exe
+
+    # Gate on: IOSurface-backed sharing, fences, and swapchain ID republish.
+    WINEPREFIX=${wine_prefix} WINEARCH=win64 WINEDEBUG=-all MVK_CONFIG_LOG_LEVEL=0 \
+    DXMT_BASALT_IOSURFACE=1 BASALT_EXPECT_IOSURFACE=1 \
+        "${wine_root}/bin/wine" ./dxmt_iosurface_probe.exe
+    WINEPREFIX=${wine_prefix} WINEARCH=win64 WINEDEBUG=-all MVK_CONFIG_LOG_LEVEL=0 \
+    DXMT_BASALT_IOSURFACE=1 \
+        "${wine_root}/bin/wine" ./dxmt_shared_texture_probe.exe
+    WINEPREFIX=${wine_prefix} WINEARCH=win64 WINEDEBUG=-all MVK_CONFIG_LOG_LEVEL=0 \
+    DXMT_BASALT_IOSURFACE=1 \
+        "${wine_root}/bin/wine" ./dxmt_fence_probe.exe
+    # A visible HWND swapchain exercises the Wine mac-driver bridge that the
+    # headless texture/runtime probes cannot reach.
+    WINEPREFIX=${wine_prefix} WINEARCH=win64 WINEDEBUG=-all MVK_CONFIG_LOG_LEVEL=0 \
+    DXMT_BASALT_IOSURFACE=1 \
+        "${wine_root}/bin/wine" ./dxmt_window_swapchain_probe.exe
+    WINEPREFIX=${wine_prefix} WINEDEBUG=-all MVK_CONFIG_LOG_LEVEL=0 \
+    DXMT_BASALT_IOSURFACE=1 BASALT_EXPECT_IOSURFACE=1 \
+        "${wine_root}/bin/wine" ./d3d11_runtime_smoke.exe
+
+    # Cross-process zero-copy pixel proof (docs/DXMT-INTEROP.md acceptance
+    # test 2): a Wine process renders a known pattern into a gated texture
+    # and holds it; the native tool maps the same IOSurface and verifies it.
+    cc -O2 -Wall -Wextra -framework IOSurface -framework CoreFoundation \
+        -o "${probe_dir}/iosurface_readback" \
+        "${runtime_dir}/tests/native/iosurface_readback.c"
+    pixel_done=${probe_dir}/pixel-done.$$
+    pixel_out=${probe_dir}/pixel-source-out.$$
+    rm -f "${pixel_done}" "${pixel_out}"
+    WINEPREFIX=${wine_prefix} WINEARCH=win64 WINEDEBUG=-all MVK_CONFIG_LOG_LEVEL=0 \
+    DXMT_BASALT_IOSURFACE=1 BASALT_DONE_FILE="Z:${pixel_done//\//\\}" \
+        "${wine_root}/bin/wine" ./dxmt_iosurface_pixel_source.exe > "${pixel_out}" &
+    pixel_source_pid=$!
+    for _ in {1..600}; do
+        if grep -q '^BASALT_IOSURFACE_ID=' "${pixel_out}" 2>/dev/null; then
+            break
+        fi
+        if ! kill -0 ${pixel_source_pid} 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+    done
+    pixel_iosurface_id=$(grep -m1 '^BASALT_IOSURFACE_ID=' "${pixel_out}" | cut -d= -f2 | tr -d '\r' || true)
+    if [[ -z ${pixel_iosurface_id} ]]; then
+        print -u2 "FAIL: the Wine pixel source never published an IOSurfaceID"
+        cat "${pixel_out}" >&2 || true
+        exit 1
+    fi
+    "${probe_dir}/iosurface_readback" "${pixel_iosurface_id}"
+    touch "${pixel_done}"
+    if ! wait ${pixel_source_pid}; then
+        print -u2 "FAIL: the Wine pixel source exited with an error"
+        cat "${pixel_out}" >&2 || true
+        exit 1
+    fi
+    rm -f "${pixel_done}" "${pixel_out}"
+
+    # Control-socket FrameReady gate (docs/DXMT-INTEROP.md §3-4): the OpenXR
+    # smoke connects to a native daemon which validates the hello/token
+    # handshake, looks up every registered swapchain IOSurface, and requires
+    # a fence-confirmed FrameReady plus clean teardown.
+    cc -O2 -Wall -Wextra -framework IOSurface -framework CoreFoundation \
+        -o "${probe_dir}/basalt_control_test_daemon" \
+        "${runtime_dir}/tests/native/basalt_control_test_daemon.c"
+    control_file=${probe_dir}/control-file.$$
+    daemon_out=${probe_dir}/daemon-out.$$
+    rm -f "${control_file}" "${daemon_out}"
+    "${probe_dir}/basalt_control_test_daemon" --control-file "${control_file}" \
+        --expect-frames 21 --verify-clears > "${daemon_out}" 2>&1 &
+    control_daemon_pid=$!
+    for _ in {1..100}; do
+        if [[ -s ${control_file} ]]; then
+            break
+        fi
+        sleep 0.1
+    done
+    WINEPREFIX=${wine_prefix} WINEDEBUG=-all MVK_CONFIG_LOG_LEVEL=0 \
+    DXMT_BASALT_IOSURFACE=1 BASALT_EXPECT_IOSURFACE=1 BASALT_EXPECT_HEAD_POSE=1 \
+    BASALT_CONTROL="Z:${control_file//\//\\}" \
+        "${wine_root}/bin/wine" ./d3d11_runtime_smoke.exe
+    if ! wait ${control_daemon_pid}; then
+        print -u2 "FAIL: control daemon validation failed"
+        cat "${daemon_out}" >&2 || true
+        exit 1
+    fi
+    grep '^PASS' "${daemon_out}"
+    rm -f "${control_file}" "${daemon_out}"
+
+    # Leave the generated Wine tree and prefix on the pinned stock overlay.
+    overlay_dxmt "${dxmt_root}/x86_64-windows" "${dxmt_root}/x86_64-unix"
+    print "PASS: Basalt DXMT fork gate (IOSurface IDs, native readback, control-socket FrameReady)"
+else
+    print "NOTE: fork phase skipped; run runtime/scripts/build-dxmt-fork.zsh to enable it"
+fi
+popd >/dev/null
+
+print "PASS: Wine ${wine_version} + DXMT ${dxmt_version} sharing, fence frame completion, and OpenXR D3D11 swapchains"

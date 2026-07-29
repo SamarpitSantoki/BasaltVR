@@ -1,0 +1,86 @@
+name: Developer preview release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semantic version without the v prefix
+        required: true
+        default: 0.1.0
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish Apple Silicon preview
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: zsh
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="${{ inputs.version }}"
+          fi
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]; then
+            print -u2 "Invalid release version: $version"
+            exit 2
+          fi
+          print "version=$version" >> "$GITHUB_OUTPUT"
+          print "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install release prerequisites
+        run: brew install cmake mingw-w64 meson ninja
+
+      - name: Build and verify Basalt DXMT fork
+        run: |
+          runtime/scripts/build-dxmt-fork.zsh
+          runtime/scripts/test-dxmt.zsh
+
+      - name: Run Swift tests
+        run: swift test --package-path streamer
+
+      - name: Build release archive
+        run: packaging/build-release.zsh "${{ steps.version.outputs.version }}"
+
+      - name: Publish prerelease and assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: zsh
+        run: |
+          notes="docs/releases/${TAG}.md"
+          [[ -f "$notes" ]] || {
+            print -u2 "Missing release notes: $notes"
+            exit 1
+          }
+          assets=(
+            "release/BasaltVR-${VERSION}-macos-arm64.zip"
+            "release/BasaltVR-${VERSION}-macos-arm64.zip.sha256"
+          )
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${assets[@]}" --clobber
+            gh release edit "$TAG" \
+              --title "BasaltVR ${VERSION} developer preview" \
+              --notes-file "$notes" \
+              --prerelease
+          else
+            gh release create "$TAG" "${assets[@]}" \
+              --target "$GITHUB_SHA" \
+              --title "BasaltVR ${VERSION} developer preview" \
+              --notes-file "$notes" \
+              --prerelease
+          fi

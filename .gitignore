@@ -1,0 +1,14 @@
+.DS_Store
+.swiftpm/
+DerivedData/
+*.dSYM/
+
+streamer/.build/
+streamer/streamer-control-file
+streamer/streamer-out
+
+runtime/build*/
+
+dist/
+release/
+packaging/*.iconset/
