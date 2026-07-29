@@ -5,14 +5,16 @@ notarized, and accepted from a clean macOS user account with a live headset.
 
 ## Before tagging
 
-1. Update `CHANGELOG.md`, `packaging/Info.plist`, and `docs/releases/vX.Y.Z.md`.
+1. Update `CHANGELOG.md` and `docs/releases/vX.Y.Z.md`. The packager writes the requested version
+   into `Info.plist` and refuses to build when either release document is missing.
 2. Run:
 
    ```sh
-   swift test --package-path streamer
-   runtime/scripts/test-wine.zsh
-   runtime/scripts/test-dxmt.zsh
-   packaging/build-release.zsh X.Y.Z
+   make doctor-dxmt
+   make check
+   make runtime-test
+   make dxmt-test
+   make release VERSION=X.Y.Z
    ```
 
 3. Verify the generated archive:
@@ -25,7 +27,14 @@ notarized, and accepted from a clean macOS user account with a live headset.
 
 4. Confirm the app and all bundled native executables are arm64, the app's internal signature
    verifies, and the support manifest records `wineIncluded` as `false`.
-5. Sanitize release notes and logs. Never publish account names, home-directory paths, ADB serials,
+5. Extract the ZIP into a clean temporary directory and run the bundled CLI outside the source
+   checkout:
+
+   ```sh
+   /path/to/BasaltVR.app/Contents/MacOS/basaltctl doctor
+   ```
+
+6. Sanitize release notes and logs. Never publish account names, home-directory paths, ADB serials,
    Steam credentials, game files, or captured content.
 
 ## Publishing
@@ -35,7 +44,16 @@ fork, runs Swift tests, creates the archive and checksum, and publishes a GitHub
 `docs/releases/vX.Y.Z.md`.
 
 The workflow uses the repository-scoped `GITHUB_TOKEN` with only `contents: write`. No Apple
-signing credentials are required for the current ad-hoc-signed preview.
+signing credentials are required for the current ad-hoc-signed preview. It refuses to overwrite
+an existing GitHub release; publish a new version for any corrected artifact.
+
+Release builds run on a pinned Apple Silicon runner image while the native build and DXMT fork
+explicitly preserve the macOS 14 deployment target. Workflow actions are pinned to immutable
+commits and updated through Dependabot.
+
+After publishing, download the assets from GitHub rather than reusing local files, verify the
+checksum and signature again, and confirm the release notes and "latest release" link render
+correctly.
 
 ## Consumer-release gates
 

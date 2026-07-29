@@ -5,32 +5,41 @@ on:
     branches:
       - main
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  swift:
-    name: Swift build and tests
-    runs-on: macos-14
+  quality:
+    name: Repository and Swift quality
+    runs-on: macos-15
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - name: Test Swift package
-        run: swift test --package-path streamer
-      - name: Build Apple Silicon release
-        run: swift build -c release --arch arm64 --package-path streamer
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Run contributor quality gate
+        run: make check
 
   runtime:
     name: OpenXR cross-build
-    runs-on: macos-14
+    runs-on: macos-15
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - name: Install cross-build prerequisites
         run: brew install cmake mingw-w64
+      - name: Verify cross-build environment
+        run: make doctor-runtime
       - name: Configure runtime
         run: >-
           cmake -S runtime -B runtime/build-ci
@@ -38,7 +47,3 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
       - name: Build runtime and smoke executables
         run: cmake --build runtime/build-ci --parallel
-      - name: Validate scripts and metadata
-        run: |
-          zsh -n packaging/*.zsh runtime/scripts/*.zsh
-          plutil -lint packaging/Info.plist

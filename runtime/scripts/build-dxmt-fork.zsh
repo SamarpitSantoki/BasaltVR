@@ -25,6 +25,8 @@ readonly basalt_tag=v0.80-basalt.1
 readonly llvm_repo=https://github.com/llvm/llvm-project.git
 readonly llvm_tag=llvmorg-15.0.7
 readonly llvm_commit=8dfdcc7b7bf66834a761bd8de445840ef68e4d1a
+readonly macos_deployment_target=14.0
+readonly macos_deployment_flag="-mmacosx-version-min=${macos_deployment_target}"
 
 # DXMT's own CI builds the official v0.80 release against this Wine build
 # tree; the produced artifacts demonstrably run under the Gcenx Wine 11.10
@@ -42,6 +44,7 @@ wine_tools_dir=${toolchain_dir}/wine-v8.16-3shain
 llvm_project_dir=${toolchain_dir}/llvm-project
 llvm_build_dir=${toolchain_dir}/llvm-build
 llvm_install_dir=${toolchain_dir}/llvm-darwin
+llvm_deployment_stamp=${llvm_install_dir}/.basalt-macos-deployment-target
 
 for tool in git meson ninja cmake curl shasum tar x86_64-w64-mingw32-g++; do
     if ! command -v ${tool} >/dev/null; then
@@ -146,7 +149,9 @@ fi
 
 # --- LLVM 15 x86_64 static libraries (DXMT DEVELOPMENT.md recipe) -----------
 
-if [[ ! -f ${llvm_install_dir}/lib/libLLVMCore.a ]]; then
+if [[ ! -f ${llvm_install_dir}/lib/libLLVMCore.a ||
+      ! -f ${llvm_deployment_stamp} ||
+      "$(<${llvm_deployment_stamp})" != ${macos_deployment_target} ]]; then
     if [[ ! -d ${llvm_project_dir}/.git ]]; then
         git clone --depth 1 --branch "${llvm_tag}" "${llvm_repo}" "${llvm_project_dir}"
     fi
@@ -158,6 +163,7 @@ if [[ ! -f ${llvm_install_dir}/lib/libLLVMCore.a ]]; then
     cmake -B "${llvm_build_dir}" -S "${llvm_project_dir}/llvm" \
         -DCMAKE_INSTALL_PREFIX="${llvm_install_dir}" \
         -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+        -DCMAKE_OSX_DEPLOYMENT_TARGET="${macos_deployment_target}" \
         -DLLVM_HOST_TRIPLE=x86_64-apple-darwin \
         -DLLVM_ENABLE_ASSERTIONS=On \
         -DLLVM_ENABLE_ZSTD=Off \
@@ -172,6 +178,7 @@ if [[ ! -f ${llvm_install_dir}/lib/libLLVMCore.a ]]; then
         -G Ninja
     ninja -C "${llvm_build_dir}"
     ninja -C "${llvm_build_dir}" install
+    print -r -- "${macos_deployment_target}" > "${llvm_deployment_stamp}"
 fi
 
 # --- DXMT cross build (mirrors DXMT CI's gcc release job) -------------------
@@ -180,7 +187,12 @@ reconfigure=()
 if [[ -d ${src_dir}/build ]]; then
     reconfigure=(--reconfigure)
 fi
+MACOSX_DEPLOYMENT_TARGET="${macos_deployment_target}" \
 meson setup --cross-file "${src_dir}/build-win64.txt" \
+    -Dbuild.c_args="${macos_deployment_flag}" \
+    -Dbuild.cpp_args="${macos_deployment_flag}" \
+    -Dbuild.c_link_args="${macos_deployment_flag}" \
+    -Dbuild.cpp_link_args="${macos_deployment_flag}" \
     -Dnative_llvm_path="${llvm_install_dir}" \
     -Dwine_install_path="${wine_tools_dir}" \
     "${src_dir}/build" "${src_dir}" \

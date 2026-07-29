@@ -1,0 +1,54 @@
+name: Setup or help request
+description: Ask for help with the documented BasaltVR setup
+title: "[Help]: "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        BasaltVR is an experimental developer preview. Please search existing issues and read
+        SUPPORT.md before submitting. Sanitize usernames, device IDs, credentials, and captured
+        content from all logs.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v0.1.0 or commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Mac model/chip, macOS, headset, ALVR, Wine, and USB or Wi-Fi.
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to do?
+    validations:
+      required: true
+  - type: textarea
+    id: attempted
+    attributes:
+      label: Documentation and commands tried
+      description: Include the guide section and the exact command that failed.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Include relevant output from make doctor or basaltctl doctor.
+      render: shell
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed credentials, usernames, device identifiers, proprietary files, and private captured content.
+          required: true

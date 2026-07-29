@@ -38,7 +38,7 @@ consumer-release work, not blockers for making the repository public.
 - Add online metadata/artwork only with clear caching and privacy behavior.
 - Add structured, redactable diagnostic export for bug reports.
 - Add screenshots and a short hardware-identified demo to the README.
-- Define issue labels and a compatibility-report template after the repository is public.
+- Create the documented issue-label set when the repository is initialized.
 
 ## Explicitly out of scope for 0.1
 

@@ -1,0 +1,57 @@
+name: Compatibility report
+description: Record a working or failing BasaltVR hardware/software combination
+title: "[Compatibility]: "
+labels:
+  - compatibility
+body:
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: Outcome
+      options:
+        - Working
+        - Partially working
+        - Not working
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: BasaltVR version or commit
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Complete environment
+      description: Mac/chip, macOS, headset, ALVR, Wine/DXMT, game/version, and connection type.
+    validations:
+      required: true
+  - type: textarea
+    id: settings
+    attributes:
+      label: Stream and launch settings
+      description: Resolution, refresh rate, bitrate, transport, audio, launch source, and relevant overrides.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Observed result
+      description: Include test duration, performance, input/audio behavior, and any recovery attempts.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      render: shell
+  - type: checkboxes
+    id: evidence
+    attributes:
+      label: Evidence
+      options:
+        - label: I tested this result on physical hardware.
+          required: true
+        - label: I removed credentials, usernames, device identifiers, proprietary files, and private captured content.
+          required: true

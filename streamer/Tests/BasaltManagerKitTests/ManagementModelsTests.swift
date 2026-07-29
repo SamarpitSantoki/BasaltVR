@@ -23,58 +23,6 @@ final class ManagementModelsTests: XCTestCase {
             .loggedOff)
     }
 
-    func testRepositoryLocatorWalksUpAndHonorsValidatedOverride() throws {
-        let temporary = try temporaryDirectory()
-        let nested = temporary.appendingPathComponent("a/b/c", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: temporary.appendingPathComponent("runtime"),
-            withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(
-            at: temporary.appendingPathComponent("streamer"),
-            withIntermediateDirectories: true)
-        try Data().write(to: temporary.appendingPathComponent("runtime/CMakeLists.txt"))
-        try Data().write(to: temporary.appendingPathComponent("streamer/Package.swift"))
-        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
-
-        XCTAssertEqual(
-            try RepositoryLocator.find(startingAt: nested, environment: [:]),
-            temporary.standardizedFileURL)
-        XCTAssertEqual(
-            try RepositoryLocator.find(startingAt: URL(fileURLWithPath: "/"),
-                                       environment: ["BASALT_REPO_ROOT": temporary.path]),
-            temporary.standardizedFileURL)
-        XCTAssertThrowsError(
-            try RepositoryLocator.find(startingAt: URL(fileURLWithPath: "/"),
-                                       environment: ["BASALT_REPO_ROOT": nested.path]))
-    }
-
-    func testRepositoryLocatorAcceptsPackagedSupportRoot() throws {
-        let temporary = try temporaryDirectory()
-        let runtime = temporary.appendingPathComponent(
-            "runtime/build/bin", isDirectory: true)
-        let docs = temporary.appendingPathComponent("docs", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: runtime, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(
-            at: docs, withIntermediateDirectories: true)
-        for path in [
-            temporary.appendingPathComponent("BasaltVR.support.json"),
-            runtime.appendingPathComponent("basalt_openxr.dll"),
-            runtime.appendingPathComponent("basalt_openxr.json"),
-            docs.appendingPathComponent("BOTTLES.md"),
-        ] {
-            try Data().write(to: path)
-        }
-
-        let nested = temporary.appendingPathComponent(
-            "nested/release", isDirectory: true)
-        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
-
-        XCTAssertEqual(
-            try RepositoryLocator.find(startingAt: nested, environment: [:]),
-            temporary.standardizedFileURL)
-    }
-
     func testDetectsBeatSaberAndInfersLaunchSource() throws {
         let temporary = try temporaryDirectory()
         let prefix = temporary.appendingPathComponent("prefix", isDirectory: true)

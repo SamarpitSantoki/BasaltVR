@@ -111,19 +111,27 @@ private struct BasaltCLI {
     }
 
     private static func discoverRepoRoot() throws -> URL {
-        var candidate = URL(fileURLWithPath: FileManager.default.currentDirectoryPath,
-                            isDirectory: true).standardizedFileURL
-        for _ in 0..<8 {
-            let runtime = candidate.appendingPathComponent("runtime/CMakeLists.txt")
-            let package = candidate.appendingPathComponent("streamer/Package.swift")
-            if FileManager.default.fileExists(atPath: runtime.path),
-               FileManager.default.fileExists(atPath: package.path) {
-                return candidate
-            }
-            candidate.deleteLastPathComponent()
+        let discoveryError: Error
+        do {
+            return try RepositoryLocator.find()
+        } catch {
+            discoveryError = error
         }
-        throw BottleToolError(
-            "Could not find the BasaltVR repository; pass --repo /path/to/BasaltVR")
+
+        let packagedSupport = Bundle.main.resourceURL?
+            .appendingPathComponent("BasaltVR", isDirectory: true)
+        let candidates = [
+            packagedSupport,
+            Bundle.main.executableURL,
+        ].compactMap { $0 }
+
+        if let bundled = candidates.lazy.compactMap({
+            try? RepositoryLocator.find(startingAt: $0, environment: [:])
+        }).first {
+            return bundled
+        }
+
+        throw discoveryError
     }
 
     private static func doctor(_ manager: BottleManager, root: URL,

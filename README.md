@@ -20,6 +20,17 @@ For a complete setup, read the [management app guide](docs/MANAGEMENT.md) and
 [bottle guide](docs/BOTTLES.md). The preview archive deliberately does not redistribute Wine,
 ALVR, OpenComposite, BlackHole, games, or store credentials.
 
+Verify a downloaded archive before opening it:
+
+```sh
+shasum -a 256 -c BasaltVR-0.1.0-macos-arm64.zip.sha256
+```
+
+Extract the ZIP, move `BasaltVR.app` to Applications if desired, and use **Open** from Finder's
+context menu on first launch. The app's **Setup** page reports missing runtime, Wine, ADB, and
+optional audio prerequisites. This preview is intended for technical users; it is not yet a
+turnkey installer.
+
 ## What this project is
 
 BasaltVR reimplements a PCVR-on-Apple-Silicon pipeline around Wine/GPTK,
@@ -50,7 +61,7 @@ behind a launch profile. General PCVR support comes after that vertical path wor
 | **M4** | Tracking, controllers & haptics (ALVR input ↔ OpenXR actions) | ✅ automated HMD/Touch actions, spaces, velocity, loss/recovery, profiles, priority, and haptics pass; pinned Khronos `hello_xr` completes the external-app session path, and the live Quest gate is physically verified at 72 fps |
 | M5 | Wine bottle tooling: isolated DXMT engine, OpenXR registration, OpenComposite, launch profiles | ✅ CLI complete; disposable managed-bottle acceptance passes |
 | M6 | Audio (BlackHole) + USB streaming (adb) | ✅ 48 kHz stereo PCM reaches Quest over wired ALVR; live gate holds 1.536 Mbps with zero audio drops and audible headset output |
-| M7 | Management app: setup wizard, Steam/Whisky/CrossOver library, launcher | 🟨 full development UI working; packaging and live acceptance remain |
+| M7 | Management app: setup wizard, Steam/Whisky/CrossOver library, launcher | 🟨 preview packaging works; Developer ID/notarization and clean-user live acceptance remain |
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design and what each
 milestone involves.
@@ -64,11 +75,12 @@ processes; and graphs live Quest FPS, wire bitrate, and input-to-display latency
 are read-only until the user explicitly makes an isolated APFS-cloned Basalt copy.
 
 ```sh
-# Build every executable once so the app can launch the streamer directly.
-swift build -c release --package-path streamer
+# Check the local toolchain and run the contributor quality gate.
+make doctor
+make check
 
-# Run the current development app.
-swift run --package-path streamer BasaltVR
+# Build every executable and run the development app.
+make app
 ```
 
 The app intentionally writes only to Basalt's managed data root. It discovers but never edits
@@ -355,9 +367,11 @@ worth having in the open. That's this project.
 ## Contributing and releases
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development and pull-request expectations,
+[SUPPORT.md](SUPPORT.md) for setup and compatibility-reporting help,
 [SECURITY.md](SECURITY.md) for private vulnerability reporting, and
-[docs/RELEASING.md](docs/RELEASING.md) for the reproducible preview-release process. Product and
-consumer-release work is tracked in [ROADMAP.md](ROADMAP.md).
+[docs/MAINTAINING.md](docs/MAINTAINING.md) for triage and repository operations.
+[docs/RELEASING.md](docs/RELEASING.md) defines the reproducible preview-release process, and
+product and consumer-release work is tracked in [ROADMAP.md](ROADMAP.md).
 
 ## License
 

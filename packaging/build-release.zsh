@@ -21,7 +21,17 @@ if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]; then
     exit 2
 fi
 
-for tool in swift cmake ditto codesign iconutil sips plutil shasum perl; do
+readonly release_notes="${repo_dir}/docs/releases/v${version}.md"
+if [[ ! -f "$release_notes" ]]; then
+    print -u2 "error: release notes are missing: ${release_notes}"
+    exit 1
+fi
+if ! grep -Fq "## ${version} " "${repo_dir}/CHANGELOG.md"; then
+    print -u2 "error: CHANGELOG.md has no release heading for ${version}"
+    exit 1
+fi
+
+for tool in swift cmake ditto codesign iconutil sips plutil shasum perl unzip; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         print -u2 "error: required tool is unavailable: $tool"
         exit 1
@@ -120,6 +130,7 @@ cp "${repo_dir}/README.md" "${support_dir}/README.md"
 cp "${repo_dir}/CHANGELOG.md" "${support_dir}/CHANGELOG.md"
 cp "${repo_dir}/ROADMAP.md" "${support_dir}/ROADMAP.md"
 cp "${repo_dir}/SECURITY.md" "${support_dir}/SECURITY.md"
+cp "${repo_dir}/SUPPORT.md" "${support_dir}/SUPPORT.md"
 cp "${repo_dir}/LICENSE" "${support_dir}/LICENSE"
 cp "${repo_dir}/THIRD_PARTY_NOTICES.md" "${support_dir}/THIRD_PARTY_NOTICES.md"
 ditto "${repo_dir}/LICENSES" "${support_dir}/LICENSES"
@@ -155,9 +166,17 @@ codesign --force --deep --sign - --timestamp=none "$app_dir"
 codesign --verify --deep --strict --verbose=2 "$app_dir"
 plutil -lint "${contents_dir}/Info.plist"
 
+# Verify the bundled CLI can discover its packaged support files without relying on
+# the source checkout, current working directory, or the GUI launcher's environment.
+(
+    cd /private/tmp
+    env -u BASALT_REPO_ROOT "${macos_dir}/basaltctl" engines >/dev/null
+)
+
 rm -f "${release_dir}/${archive_name}" "${release_dir}/${archive_name}.sha256"
-ditto -c -k --sequesterRsrc --keepParent "$app_dir" \
+ditto -c -k --norsrc --keepParent "$app_dir" \
     "${release_dir}/${archive_name}"
+unzip -tq "${release_dir}/${archive_name}"
 (
     cd "$release_dir"
     shasum -a 256 "$archive_name" > "${archive_name}.sha256"

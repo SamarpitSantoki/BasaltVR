@@ -79,9 +79,9 @@ and records exactly what was included in the archive.
 swift test --package-path streamer
 ```
 
-`BasaltManagerKitTests` covers repository discovery, external-bottle metadata, Steam VDF/manifests,
-artwork, BSManager default/configured/explicit-location and managed-bottle launcher/instance
-discovery, Windows/host path mapping, Beat Saber scanning and source inference, duplicate
-resolution, stream argument generation, and live-stat parsing. `BasaltBottleKitTests` verifies
-maintenance and VR launch commands, the BSManager Steam prerequisite, profile deletion, and a real
-isolated import whose source remains unchanged.
+`BasaltManagerKitTests` covers external-bottle metadata, Steam VDF/manifests, artwork, BSManager
+default/configured/explicit-location and managed-bottle launcher/instance discovery, Windows/host
+path mapping, Beat Saber scanning and source inference, duplicate resolution, stream argument
+generation, and live-stat parsing. `BasaltBottleKitTests` verifies repository/support-root
+discovery, maintenance and VR launch commands, the BSManager Steam prerequisite, profile deletion,
+and a real isolated import whose source remains unchanged.

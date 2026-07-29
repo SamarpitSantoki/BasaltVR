@@ -21,9 +21,13 @@ concurrency:
 jobs:
   release:
     name: Build and publish Apple Silicon preview
-    runs-on: macos-14
+    runs-on: macos-15
+    timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Resolve version
         id: version
@@ -41,6 +45,13 @@ jobs:
           print "version=$version" >> "$GITHUB_OUTPUT"
           print "tag=v$version" >> "$GITHUB_OUTPUT"
 
+      - name: Validate release metadata
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          test -f "docs/releases/v${VERSION}.md"
+          grep -Fq "## ${VERSION} " CHANGELOG.md
+
       - name: Install release prerequisites
         run: brew install cmake mingw-w64 meson ninja
 
@@ -49,8 +60,8 @@ jobs:
           runtime/scripts/build-dxmt-fork.zsh
           runtime/scripts/test-dxmt.zsh
 
-      - name: Run Swift tests
-        run: swift test --package-path streamer
+      - name: Run contributor quality gate
+        run: make check
 
       - name: Build release archive
         run: packaging/build-release.zsh "${{ steps.version.outputs.version }}"
@@ -72,15 +83,12 @@ jobs:
             "release/BasaltVR-${VERSION}-macos-arm64.zip.sha256"
           )
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "${assets[@]}" --clobber
-            gh release edit "$TAG" \
-              --title "BasaltVR ${VERSION} developer preview" \
-              --notes-file "$notes" \
-              --prerelease
-          else
-            gh release create "$TAG" "${assets[@]}" \
-              --target "$GITHUB_SHA" \
-              --title "BasaltVR ${VERSION} developer preview" \
-              --notes-file "$notes" \
-              --prerelease
+            print -u2 "Release ${TAG} already exists; published assets are immutable."
+            print -u2 "Create a new version instead of replacing release history."
+            exit 1
           fi
+          gh release create "$TAG" "${assets[@]}" \
+            --target "$GITHUB_SHA" \
+            --title "BasaltVR ${VERSION} developer preview" \
+            --notes-file "$notes" \
+            --prerelease

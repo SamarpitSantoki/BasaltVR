@@ -4,7 +4,16 @@ All notable changes to BasaltVR are documented here.
 
 ## Unreleased
 
-- No unreleased changes yet.
+### Fixed
+
+- Bundled `basaltctl` now locates the app's packaged support files when invoked outside the source
+  checkout.
+
+### Project maintenance
+
+- Added one-command environment, test, build, documentation-link, and repository-hygiene checks.
+- Added maintainer, support, triage, compatibility-report, and contributor workflows.
+- Hardened GitHub Actions configuration and release preflight validation.
 
 ## 0.1.0 - 2026-07-28
 
