@@ -137,3 +137,7 @@ if(BASALT_BUILD_KHR_HELLO_XR)
     target_link_options(
         khr_hello_xr_d3d11 PRIVATE -static -static-libgcc -static-libstdc++)
 endif()
+
+add_executable(opencomposite_frame_timing_smoke opencomposite_frame_timing_smoke.cpp)
+target_compile_options(opencomposite_frame_timing_smoke PRIVATE -Wall -Wextra -Wpedantic)
+target_link_options(opencomposite_frame_timing_smoke PRIVATE -static -static-libgcc -static-libstdc++)
