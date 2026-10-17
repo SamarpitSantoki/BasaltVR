@@ -538,7 +538,11 @@ bool checkStageSpace(
         std::fprintf(stderr, "FAIL: xrLocateViews(STAGE) differs from LOCAL (%d)\n", result);
         return false;
     }
-    if (expectInjectedHeadPose() && !nearlyEqual(stageViews[0].pose.position.y, 1.5f)) {
+    // The connected smoke reaches this point right after deliberately letting
+    // the injected head pose go stale; the height only applies when tracked.
+    if (expectInjectedHeadPose() &&
+        (stageState.viewStateFlags & XR_VIEW_STATE_POSITION_TRACKED_BIT) != 0 &&
+        !nearlyEqual(stageViews[0].pose.position.y, 1.5f)) {
         std::fprintf(stderr, "FAIL: STAGE eye height %.3f is not floor-relative\n",
                      stageViews[0].pose.position.y);
         return false;
@@ -2027,9 +2031,13 @@ int main(int argc, char** argv) {
         result = xrApplyHapticFeedback(
             session, &hapticInfo,
             reinterpret_cast<const XrHapticBaseHeader*>(&vibration));
+        // STAGE shares LOCAL's origin, so the recenter is announced for both,
+        // LOCAL first, with the same changeTime and previous-space pose.
         XrEventDataReferenceSpaceChangePending recenterEvent{};
-        bool receivedRecenter = false;
-        for (int attempt = 0; XR_SUCCEEDED(result) && attempt < 100; ++attempt) {
+        XrEventDataReferenceSpaceChangePending stageRecenterEvent{};
+        uint32_t receivedRecenters = 0;
+        for (int attempt = 0;
+             XR_SUCCEEDED(result) && receivedRecenters < 2 && attempt < 100; ++attempt) {
             XrEventDataBuffer eventData{};
             eventData.type = XR_TYPE_EVENT_DATA_BUFFER;
             const XrResult eventResult = xrPollEvent(instance, &eventData);
@@ -2042,20 +2050,26 @@ int main(int argc, char** argv) {
                 result = XR_ERROR_RUNTIME_FAILURE;
                 break;
             }
-            recenterEvent = *reinterpret_cast<
-                const XrEventDataReferenceSpaceChangePending*>(&eventData);
-            receivedRecenter = true;
-            break;
+            (receivedRecenters == 0 ? recenterEvent : stageRecenterEvent) =
+                *reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(
+                    &eventData);
+            ++receivedRecenters;
         }
-        if (XR_FAILED(result) || !receivedRecenter ||
-            recenterEvent.session != session ||
-            recenterEvent.referenceSpaceType != XR_REFERENCE_SPACE_TYPE_LOCAL ||
-            recenterEvent.changeTime <= 0 || recenterEvent.poseValid != XR_TRUE ||
-            !nearlyEqual(recenterEvent.poseInPreviousSpace.position.x, -0.25f) ||
-            !nearlyEqual(recenterEvent.poseInPreviousSpace.position.y, 0.0f) ||
-            !nearlyEqual(recenterEvent.poseInPreviousSpace.position.z, 0.25f) ||
-            !nearlyEqual(recenterEvent.poseInPreviousSpace.orientation.y, 0.707106781f) ||
-            !nearlyEqual(recenterEvent.poseInPreviousSpace.orientation.w, 0.707106781f)) {
+        auto validRecenter = [&](const XrEventDataReferenceSpaceChangePending& event,
+                                 XrReferenceSpaceType referenceSpaceType) {
+            return event.session == session &&
+                   event.referenceSpaceType == referenceSpaceType &&
+                   event.changeTime > 0 && event.poseValid == XR_TRUE &&
+                   nearlyEqual(event.poseInPreviousSpace.position.x, -0.25f) &&
+                   nearlyEqual(event.poseInPreviousSpace.position.y, 0.0f) &&
+                   nearlyEqual(event.poseInPreviousSpace.position.z, 0.25f) &&
+                   nearlyEqual(event.poseInPreviousSpace.orientation.y, 0.707106781f) &&
+                   nearlyEqual(event.poseInPreviousSpace.orientation.w, 0.707106781f);
+        };
+        if (XR_FAILED(result) || receivedRecenters != 2 ||
+            !validRecenter(recenterEvent, XR_REFERENCE_SPACE_TYPE_LOCAL) ||
+            !validRecenter(stageRecenterEvent, XR_REFERENCE_SPACE_TYPE_STAGE) ||
+            stageRecenterEvent.changeTime != recenterEvent.changeTime) {
             xrDestroySession(session);
             release(context);
             release(device);
@@ -2201,15 +2215,12 @@ int main(int argc, char** argv) {
         result = xrEnumerateSwapchainFormats(
             session, formatCount, &formatCount, formats.data());
     }
-    bool foundBgra = false;
-    for (int64_t format : formats) {
-        foundBgra = foundBgra || format == DXGI_FORMAT_B8G8R8A8_UNORM;
-    }
-    // Advertise only formats the native CoreVideo compositor can wrap. RGBA
-    // IOSurfaces must fail at swapchain negotiation instead of rendering a
-    // silently black stream.
-    if (XR_FAILED(result) || !foundBgra || formats.size() != 2 ||
-        formats.front() != DXGI_FORMAT_B8G8R8A8_UNORM) {
+    // Only the zero-copy BGRA formats are advertised; other formats (RGBA for
+    // OpenComposite) are accepted by xrCreateSwapchain and converted by the
+    // runtime compositor.
+    if (XR_FAILED(result) || formats.size() != 2 ||
+        formats[0] != DXGI_FORMAT_B8G8R8A8_UNORM ||
+        formats[1] != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) {
         xrDestroySession(session);
         release(context);
         release(device);
@@ -2236,19 +2247,51 @@ int main(int argc, char** argv) {
     swapchainInfo.arraySize = 1;
     swapchainInfo.mipCount = 1;
 
+    // RGBA is accepted for the runtime compositor but never exported: the
+    // CoreVideo handoff cannot wrap DXMT's RGBA IOSurfaces.
     swapchainInfo.format = DXGI_FORMAT_R8G8B8A8_UNORM;
     XrSwapchain rgbaSwapchain = XR_NULL_HANDLE;
     result = xrCreateSwapchain(session, &swapchainInfo, &rgbaSwapchain);
-    if (result != XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED ||
-        rgbaSwapchain != XR_NULL_HANDLE) {
-        if (rgbaSwapchain != XR_NULL_HANDLE) {
-            xrDestroySwapchain(rgbaSwapchain);
+    bool rgbaPrivate = XR_SUCCEEDED(result) && rgbaSwapchain != XR_NULL_HANDLE;
+    if (rgbaPrivate) {
+        uint32_t rgbaImageCount = 0;
+        XrSwapchainImageD3D11KHR rgbaImages[3]{};
+        for (XrSwapchainImageD3D11KHR& image : rgbaImages) {
+            image.type = XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
+        }
+        result = xrEnumerateSwapchainImages(
+            rgbaSwapchain, 3, &rgbaImageCount,
+            reinterpret_cast<XrSwapchainImageBaseHeader*>(rgbaImages));
+        rgbaPrivate = XR_SUCCEEDED(result);
+        for (uint32_t index = 0; rgbaPrivate && index < rgbaImageCount; ++index) {
+            D3D11_TEXTURE2D_DESC description{};
+            rgbaImages[index].texture->GetDesc(&description);
+            uint32_t iosurfaceId = 0;
+            UINT iosurfaceIdSize = sizeof(iosurfaceId);
+            rgbaPrivate =
+                (description.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) == 0 &&
+                FAILED(rgbaImages[index].texture->GetPrivateData(
+                    kBasaltIOSurfaceIdGuid, &iosurfaceIdSize, &iosurfaceId));
+        }
+        const XrResult destroyResult = xrDestroySwapchain(rgbaSwapchain);
+        rgbaPrivate = rgbaPrivate && XR_SUCCEEDED(destroyResult);
+    }
+    swapchainInfo.format = DXGI_FORMAT_BC1_UNORM;
+    XrSwapchain compressedSwapchain = XR_NULL_HANDLE;
+    const XrResult compressedResult =
+        xrCreateSwapchain(session, &swapchainInfo, &compressedSwapchain);
+    if (!rgbaPrivate ||
+        compressedResult != XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED ||
+        compressedSwapchain != XR_NULL_HANDLE) {
+        if (compressedSwapchain != XR_NULL_HANDLE) {
+            xrDestroySwapchain(compressedSwapchain);
         }
         xrDestroySession(session);
         release(context);
         release(device);
         xrDestroyInstance(instance);
-        return fail("xrCreateSwapchain(unsupported RGBA transport)", result);
+        return fail("xrCreateSwapchain(private RGBA / unsupported BC1)",
+                    rgbaPrivate ? compressedResult : result);
     }
     swapchainInfo.format = DXGI_FORMAT_B8G8R8A8_UNORM;
 
@@ -2818,32 +2861,50 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(options.renderFrames),
                 expectConnected() ? " and delivered to the control daemon" : "");
 
+    // Quad layers are composited by the runtime (d3d11_compositor_smoke
+    // covers them); here only frames that must not reach the daemon are
+    // submitted: an invalid quad and an extension layer type that was never
+    // enabled.
     XrCompositionLayerQuad quadLayer{};
     quadLayer.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
     quadLayer.space = localSpace;
     quadLayer.subImage = projectionViews[0].subImage;
     quadLayer.pose.orientation.w = 1.0f;
-    quadLayer.size = {1.0f, 1.0f};
-    result = xrWaitFrame(session, nullptr, &layerFrameState);
-    if (XR_SUCCEEDED(result)) {
-        result = xrBeginFrame(session, nullptr);
-    }
-    frameEndInfo.displayTime = layerFrameState.predictedDisplayTime;
-    submittedLayers[0] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quadLayer);
-    if (XR_SUCCEEDED(result)) {
-        result = xrEndFrame(session, &frameEndInfo);
-        if (result != XR_ERROR_LAYER_INVALID) {
-            xrDestroySwapchain(secondSwapchain);
-            xrDestroySwapchain(swapchain);
-            xrDestroySession(session);
-            release(context);
-            release(device);
-            xrDestroyInstance(instance);
-            return fail("quad layer rejection", result);
+    quadLayer.size = {0.0f, 1.0f};
+    for (const XrResult expected :
+         {XR_ERROR_VALIDATION_FAILURE, XR_ERROR_LAYER_INVALID}) {
+        if (expected == XR_ERROR_LAYER_INVALID) {
+            // XR_KHR_composition_layer_cylinder's layer type.
+            quadLayer.type = static_cast<XrStructureType>(1000017000);
+            quadLayer.size = {1.0f, 1.0f};
         }
-        frameEndInfo.layerCount = 0;
-        frameEndInfo.layers = nullptr;
-        result = xrEndFrame(session, &frameEndInfo);
+        result = xrWaitFrame(session, nullptr, &layerFrameState);
+        if (XR_SUCCEEDED(result)) {
+            result = xrBeginFrame(session, nullptr);
+        }
+        frameEndInfo.displayTime = layerFrameState.predictedDisplayTime;
+        frameEndInfo.layerCount = 1;
+        frameEndInfo.layers = submittedLayers;
+        submittedLayers[0] =
+            reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quadLayer);
+        if (XR_SUCCEEDED(result)) {
+            result = xrEndFrame(session, &frameEndInfo);
+            if (result != expected) {
+                xrDestroySwapchain(secondSwapchain);
+                xrDestroySwapchain(swapchain);
+                xrDestroySession(session);
+                release(context);
+                release(device);
+                xrDestroyInstance(instance);
+                return fail("invalid quad / unknown layer rejection", result);
+            }
+            frameEndInfo.layerCount = 0;
+            frameEndInfo.layers = nullptr;
+            result = xrEndFrame(session, &frameEndInfo);
+        }
+        if (XR_FAILED(result)) {
+            break;
+        }
     }
     if (XR_FAILED(result)) {
         xrDestroySwapchain(secondSwapchain);
