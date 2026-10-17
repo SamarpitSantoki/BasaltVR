@@ -83,11 +83,18 @@ public struct LaunchProfile: Codable, Equatable, Sendable {
     public var arguments: [String]
     public var workingDirectory: String?
     public var environment: [String: String]
+    /// Install folder of the game, used to decide when a session is over. Some
+    /// games start a second program and exit (The Lab starts Robot Repair), so
+    /// the launched executable ending does not end the game. `play.zsh` keeps
+    /// the session open while any Windows process runs from under this folder.
+    /// When nil, it uses the `steamapps/common/<Game>` folder of `executable`.
+    public var gameRoot: String?
 
     public init(name: String, bottleName: String, source: LaunchSource,
                 executable: String, arguments: [String] = [],
                 workingDirectory: String? = nil,
-                environment: [String: String] = [:]) {
+                environment: [String: String] = [:],
+                gameRoot: String? = nil) {
         formatVersion = Self.currentFormatVersion
         self.name = name
         self.bottleName = bottleName
@@ -96,6 +103,7 @@ public struct LaunchProfile: Codable, Equatable, Sendable {
         self.arguments = arguments
         self.workingDirectory = workingDirectory
         self.environment = environment
+        self.gameRoot = gameRoot
     }
 }
 
