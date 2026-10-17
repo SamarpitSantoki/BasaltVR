@@ -538,7 +538,11 @@ bool checkStageSpace(
         std::fprintf(stderr, "FAIL: xrLocateViews(STAGE) differs from LOCAL (%d)\n", result);
         return false;
     }
-    if (expectInjectedHeadPose() && !nearlyEqual(stageViews[0].pose.position.y, 1.5f)) {
+    // The connected smoke reaches this point right after deliberately letting
+    // the injected head pose go stale; the height only applies when tracked.
+    if (expectInjectedHeadPose() &&
+        (stageState.viewStateFlags & XR_VIEW_STATE_POSITION_TRACKED_BIT) != 0 &&
+        !nearlyEqual(stageViews[0].pose.position.y, 1.5f)) {
         std::fprintf(stderr, "FAIL: STAGE eye height %.3f is not floor-relative\n",
                      stageViews[0].pose.position.y);
         return false;
@@ -2326,15 +2330,12 @@ int main(int argc, char** argv) {
         result = xrEnumerateSwapchainFormats(
             session, formatCount, &formatCount, formats.data());
     }
-    bool foundBgra = false;
-    for (int64_t format : formats) {
-        foundBgra = foundBgra || format == DXGI_FORMAT_B8G8R8A8_UNORM;
-    }
-    // Advertise only formats the native CoreVideo compositor can wrap. RGBA
-    // IOSurfaces must fail at swapchain negotiation instead of rendering a
-    // silently black stream.
-    if (XR_FAILED(result) || !foundBgra || formats.size() != 2 ||
-        formats.front() != DXGI_FORMAT_B8G8R8A8_UNORM) {
+    // Only the zero-copy BGRA formats are advertised; other formats (RGBA for
+    // OpenComposite) are accepted by xrCreateSwapchain and converted by the
+    // runtime compositor.
+    if (XR_FAILED(result) || formats.size() != 2 ||
+        formats[0] != DXGI_FORMAT_B8G8R8A8_UNORM ||
+        formats[1] != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) {
         xrDestroySession(session);
         release(context);
         release(device);
@@ -2361,19 +2362,51 @@ int main(int argc, char** argv) {
     swapchainInfo.arraySize = 1;
     swapchainInfo.mipCount = 1;
 
+    // RGBA is accepted for the runtime compositor but never exported: the
+    // CoreVideo handoff cannot wrap DXMT's RGBA IOSurfaces.
     swapchainInfo.format = DXGI_FORMAT_R8G8B8A8_UNORM;
     XrSwapchain rgbaSwapchain = XR_NULL_HANDLE;
     result = xrCreateSwapchain(session, &swapchainInfo, &rgbaSwapchain);
-    if (result != XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED ||
-        rgbaSwapchain != XR_NULL_HANDLE) {
-        if (rgbaSwapchain != XR_NULL_HANDLE) {
-            xrDestroySwapchain(rgbaSwapchain);
+    bool rgbaPrivate = XR_SUCCEEDED(result) && rgbaSwapchain != XR_NULL_HANDLE;
+    if (rgbaPrivate) {
+        uint32_t rgbaImageCount = 0;
+        XrSwapchainImageD3D11KHR rgbaImages[3]{};
+        for (XrSwapchainImageD3D11KHR& image : rgbaImages) {
+            image.type = XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
+        }
+        result = xrEnumerateSwapchainImages(
+            rgbaSwapchain, 3, &rgbaImageCount,
+            reinterpret_cast<XrSwapchainImageBaseHeader*>(rgbaImages));
+        rgbaPrivate = XR_SUCCEEDED(result);
+        for (uint32_t index = 0; rgbaPrivate && index < rgbaImageCount; ++index) {
+            D3D11_TEXTURE2D_DESC description{};
+            rgbaImages[index].texture->GetDesc(&description);
+            uint32_t iosurfaceId = 0;
+            UINT iosurfaceIdSize = sizeof(iosurfaceId);
+            rgbaPrivate =
+                (description.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) == 0 &&
+                FAILED(rgbaImages[index].texture->GetPrivateData(
+                    kBasaltIOSurfaceIdGuid, &iosurfaceIdSize, &iosurfaceId));
+        }
+        const XrResult destroyResult = xrDestroySwapchain(rgbaSwapchain);
+        rgbaPrivate = rgbaPrivate && XR_SUCCEEDED(destroyResult);
+    }
+    swapchainInfo.format = DXGI_FORMAT_BC1_UNORM;
+    XrSwapchain compressedSwapchain = XR_NULL_HANDLE;
+    const XrResult compressedResult =
+        xrCreateSwapchain(session, &swapchainInfo, &compressedSwapchain);
+    if (!rgbaPrivate ||
+        compressedResult != XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED ||
+        compressedSwapchain != XR_NULL_HANDLE) {
+        if (compressedSwapchain != XR_NULL_HANDLE) {
+            xrDestroySwapchain(compressedSwapchain);
         }
         xrDestroySession(session);
         release(context);
         release(device);
         xrDestroyInstance(instance);
-        return fail("xrCreateSwapchain(unsupported RGBA transport)", result);
+        return fail("xrCreateSwapchain(private RGBA / unsupported BC1)",
+                    rgbaPrivate ? compressedResult : result);
     }
     // UE4 hands over a typeless BGRA format for its eye textures; the runtime
     // backs it with typed BGRA instead of rejecting the swapchain.
@@ -2766,18 +2799,16 @@ int main(int argc, char** argv) {
     uint32_t imageIndex = UINT32_MAX;
     uint32_t secondImageIndex = UINT32_MAX;
 
-    // Quad layers are validated and accepted but not yet composed. The first
-    // loop frame places one ahead of the projection layer, which must still
-    // reach the daemon with that frame's pixels.
+    // Quad layers are drawn by the runtime compositor, so the render loop
+    // submits the projection alone and the daemon sees the app's own pixels.
+    // d3d11_compositor_smoke covers quads beside a projection; the checks
+    // after the loop only submit quads that must be rejected.
     XrCompositionLayerQuad quadLayer{};
     quadLayer.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
     quadLayer.space = localSpace;
     quadLayer.subImage = projectionViews[0].subImage;
     quadLayer.pose.orientation.w = 1.0f;
     quadLayer.size = {1.0f, 1.0f};
-    const XrCompositionLayerBaseHeader* quadAndProjectionLayers[] = {
-        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quadLayer),
-        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer)};
 
     // Freeze a small constellation in LOCAL from the first tracked view. It
     // remains stationary while the live eye poses move, making head rotation,
@@ -2964,9 +2995,8 @@ int main(int argc, char** argv) {
         }
         if (XR_SUCCEEDED(result)) {
             frameEndInfo.displayTime = loopFrameState.predictedDisplayTime;
-            frameEndInfo.layerCount = loopFrame == 0 ? 2 : 1;
-            frameEndInfo.layers =
-                loopFrame == 0 ? quadAndProjectionLayers : submittedLayers;
+            frameEndInfo.layerCount = 1;
+            frameEndInfo.layers = submittedLayers;
             result = xrEndFrame(session, &frameEndInfo);
         }
         if (XR_FAILED(result)) {
@@ -2992,26 +3022,35 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(options.renderFrames),
                 expectConnected() ? " and delivered to the control daemon" : "");
 
-    // A frame with only quad layers behaves like a frame with no layers: it
-    // succeeds and submits nothing. Malformed quads still fail the frame.
+    // Malformed quads and a layer type that was never enabled fail the frame
+    // and never reach the daemon.
     struct QuadCase {
         const char* name;
+        XrStructureType type;
         XrRect2Di rect;
         uint32_t arrayIndex;
+        XrExtent2Df size;
         XrResult expected;
     };
     const XrRect2Di fullRect = quadLayer.subImage.imageRect;
     const QuadCase quadCases[] = {
-        {"quad-only frame", fullRect, 0, XR_SUCCESS},
-        {"out-of-bounds quad rect",
+        {"out-of-bounds quad rect", XR_TYPE_COMPOSITION_LAYER_QUAD,
          {{static_cast<int32_t>(swapchainInfo.width) / 2, 0}, fullRect.extent},
-         0, XR_ERROR_SWAPCHAIN_RECT_INVALID},
-        {"out-of-range quad array index", fullRect, 1, XR_ERROR_VALIDATION_FAILURE},
+         0, {1.0f, 1.0f}, XR_ERROR_SWAPCHAIN_RECT_INVALID},
+        {"out-of-range quad array index", XR_TYPE_COMPOSITION_LAYER_QUAD,
+         fullRect, 1, {1.0f, 1.0f}, XR_ERROR_VALIDATION_FAILURE},
+        {"zero-size quad", XR_TYPE_COMPOSITION_LAYER_QUAD,
+         fullRect, 0, {0.0f, 1.0f}, XR_ERROR_VALIDATION_FAILURE},
+        // XR_KHR_composition_layer_cylinder's layer type.
+        {"unknown layer type", static_cast<XrStructureType>(1000017000),
+         fullRect, 0, {1.0f, 1.0f}, XR_ERROR_LAYER_INVALID},
     };
     submittedLayers[0] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quadLayer);
     for (const QuadCase& quadCase : quadCases) {
+        quadLayer.type = quadCase.type;
         quadLayer.subImage.imageRect = quadCase.rect;
         quadLayer.subImage.imageArrayIndex = quadCase.arrayIndex;
+        quadLayer.size = quadCase.size;
         result = xrWaitFrame(session, nullptr, &layerFrameState);
         if (XR_SUCCEEDED(result)) {
             result = xrBeginFrame(session, nullptr);
@@ -3046,7 +3085,7 @@ int main(int argc, char** argv) {
             return fail("quad layer recovery", result);
         }
     }
-    std::puts("PASS: quad layers are validated and accepted alongside projection");
+    std::puts("PASS: malformed quads and unknown layer types are rejected");
 
     // Wait and release apply to the oldest acquired image, not the lowest
     // index. Two full cycles move the round-robin cursor to image 2, so the

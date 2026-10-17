@@ -2,6 +2,7 @@ add_library(
     basalt_openxr
     SHARED
     basalt_openxr.def
+    compositor.cpp
     control.cpp
     entrypoints.cpp
     frame.cpp
