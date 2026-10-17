@@ -53,3 +53,5 @@ including the proxy in [`runtime/openvr-proxy`](..), is MIT-licensed.
 BasaltVR does not redistribute OpenComposite binaries, and apart from the hunks in these patches it
 contains no OpenComposite source. Users build OpenComposite locally with these patches. See also
 [THIRD_PARTY_NOTICES.md](../../../THIRD_PARTY_NOTICES.md).
+
+What each patch fixes is described in [the OpenComposite guide](../../../docs/OPENCOMPOSITE.md).
