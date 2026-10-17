@@ -1,3 +1,4 @@
+#include <winsock2.h>
 #include <windows.h>
 
 #include <d3d11_1.h>
@@ -43,6 +44,48 @@ bool expectBasaltIOSurface() {
 bool expectConnected() {
     const char* value = std::getenv("BASALT_CONTROL");
     return value != nullptr && value[0] != '\0';
+}
+
+// A connected session's control socket must not be inheritable: The Lab
+// launches Robot Repair with CreateProcess(bInheritHandles=TRUE) and exits,
+// and an inherited socket kept its connection open in the child, so the
+// streamer never saw the old session end and the new one ran headless.
+// Scans this process's handle table for sockets; at least one (the control
+// connection) must exist and none may carry HANDLE_FLAG_INHERIT.
+bool controlSocketIsNotInheritable() {
+    WSADATA wsaData{};
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        std::fputs("FAIL: WSAStartup for the socket inheritance check\n", stderr);
+        return false;
+    }
+    int sockets = 0;
+    int inheritable = 0;
+    for (uintptr_t value = 4; value < 0x10000; value += 4) {
+        const SOCKET candidate = static_cast<SOCKET>(value);
+        int type = 0;
+        int length = sizeof(type);
+        if (getsockopt(candidate, SOL_SOCKET, SO_TYPE,
+                       reinterpret_cast<char*>(&type), &length) != 0) {
+            continue;
+        }
+        DWORD flags = 0;
+        if (!GetHandleInformation(reinterpret_cast<HANDLE>(value), &flags)) {
+            continue;
+        }
+        ++sockets;
+        if ((flags & HANDLE_FLAG_INHERIT) != 0) {
+            ++inheritable;
+        }
+    }
+    WSACleanup();
+    if (sockets == 0 || inheritable != 0) {
+        std::fprintf(stderr,
+                     "FAIL: control socket inheritance: %d socket(s), %d inheritable "
+                     "(a child process would keep the session connection open)\n",
+                     sockets, inheritable);
+        return false;
+    }
+    return true;
 }
 
 bool expectInjectedHeadPose() {
@@ -953,6 +996,13 @@ int main(int argc, char** argv) {
         release(device);
         xrDestroyInstance(instance);
         return fail("xrCreateSession(D3D11 binding)", result);
+    }
+    if (expectConnected() && !controlSocketIsNotInheritable()) {
+        xrDestroySession(session);
+        release(context);
+        release(device);
+        xrDestroyInstance(instance);
+        return 1;
     }
 
     uint32_t referenceSpaceCount = 0;

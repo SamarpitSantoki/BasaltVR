@@ -60,6 +60,10 @@ constexpr SwapchainFormat kSwapchainFormats[] = {
      DXGI_FORMAT_UNKNOWN, true, false, true},
     {DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT,
      DXGI_FORMAT_UNKNOWN, false, false, true},
+    // OpenComposite's swapchain format for an R16G16B16A16_TYPELESS game
+    // texture; 16-bit content is linear.
+    {DXGI_FORMAT_R16G16B16A16_UNORM, DXGI_FORMAT_R16G16B16A16_UNORM,
+     DXGI_FORMAT_UNKNOWN, false, false, true},
     {DXGI_FORMAT_R11G11B10_FLOAT, DXGI_FORMAT_R11G11B10_FLOAT,
      DXGI_FORMAT_UNKNOWN, false, false, true},
     {DXGI_FORMAT_D32_FLOAT, DXGI_FORMAT_UNKNOWN,

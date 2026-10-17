@@ -656,6 +656,27 @@ static bool verify_scenario_view(
                                       : kBasaltSideBySideRightColor,
                             0, "eye rect center");
     }
+    case BASALT_SCENARIO_OC_TYPELESS_COPY:
+        /* Written through an sRGB RTV, so the GPU's encode may round by one. */
+        return expect_pixel(frame_number, view, surface, 0, 0, kBasaltSource2Color, 1,
+                            "Source 2 copy corner") &&
+               expect_pixel(frame_number, view, surface, width * 0.5f, height * 0.5f,
+                            kBasaltSource2Color, 1, "Source 2 copy center") &&
+               expect_pixel(frame_number, view, surface, width - 1, height - 1,
+                            kBasaltSource2Color, 1, "Source 2 copy corner");
+    case BASALT_SCENARIO_TYPELESS_8BIT:
+    case BASALT_SCENARIO_TYPELESS_WIDE: {
+        const bool wide = frame_number == BASALT_SCENARIO_TYPELESS_WIDE;
+        const uint32_t expected = wide
+            ? (view == 0 ? kBasaltWideLeftColor : kBasaltWideRightColor)
+            : (view == 0 ? kBasaltTypelessLeftColor : kBasaltTypelessRightColor);
+        const char* what = wide ? "wide typeless" : "8-bit typeless";
+        return expect_pixel(frame_number, view, surface, 0, 0, expected, 1, what) &&
+               expect_pixel(frame_number, view, surface, width * 0.5f, height * 0.5f,
+                            expected, 1, what) &&
+               expect_pixel(frame_number, view, surface, width - 1, height - 1,
+                            expected, 1, what);
+    }
     default:
         fprintf(stderr, "FAIL: unexpected FrameReady %" PRIu64 "\n", frame_number);
         return false;

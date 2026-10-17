@@ -48,7 +48,21 @@ enum {
     /* UE4's shape: one B8G8R8A8_TYPELESS image, wider than a view, with one
      * half rect per eye, stays zero-copy (the streamer crops by rect). */
     BASALT_SCENARIO_SIDE_BY_SIDE = 9,
-    BASALT_SCENARIO_COUNT = 9,
+    /* Source 2 through OpenComposite: the game renders an
+     * R8G8B8A8_TYPELESS 1881x1971 eye texture through an
+     * R8G8B8A8_UNORM_SRGB RTV, OpenComposite creates an
+     * R8G8B8A8_UNORM_SRGB swapchain of that size and CopySubresourceRegion's
+     * the game texture into it. The bytes arrive unchanged. */
+    BASALT_SCENARIO_OC_TYPELESS_COPY = 10,
+    /* Typeless 8-bit swapchains written through sRGB RTVs (left
+     * R8G8B8A8_TYPELESS, right B8G8R8X8_TYPELESS): the bytes are
+     * sRGB-encoded and arrive unchanged. B8G8R8A8_TYPELESS is not used:
+     * it is backed by typed BGRA and exported directly. */
+    BASALT_SCENARIO_TYPELESS_8BIT = 11,
+    /* Wide typeless swapchains (left R10G10B10A2_TYPELESS written through a
+     * UNORM RTV, right R16G16B16A16_TYPELESS written through a FLOAT RTV). */
+    BASALT_SCENARIO_TYPELESS_WIDE = 12,
+    BASALT_SCENARIO_COUNT = 12,
 };
 
 #define BASALT_RGBA(r, g, b, a) \
@@ -81,6 +95,16 @@ static const uint32_t kBasaltFifoHeldColor = BASALT_RGBA(140, 17, 220, 255);
 #define BASALT_SIDE_BY_SIDE_HEIGHT 1216u
 static const uint32_t kBasaltSideBySideLeftColor = BASALT_RGBA(210, 40, 120, 255);
 static const uint32_t kBasaltSideBySideRightColor = BASALT_RGBA(40, 180, 60, 255);
+/* Source 2's eye texture size at 140% of a 1344x1408 recommendation. */
+#define BASALT_SOURCE2_EYE_WIDTH 1881u
+#define BASALT_SOURCE2_EYE_HEIGHT 1971u
+static const uint32_t kBasaltSource2Color = BASALT_RGBA(188, 64, 121, 255);
+static const uint32_t kBasaltTypelessLeftColor = BASALT_RGBA(37, 170, 222, 255);
+static const uint32_t kBasaltTypelessRightColor = BASALT_RGBA(240, 120, 9, 255);
+/* Wide formats: the R10G10B10A2 bytes are treated as display-encoded like
+ * every other UNORM format; the R16G16B16A16 float values are linear. */
+static const uint32_t kBasaltWideLeftColor = BASALT_RGBA(102, 204, 51, 255);
+static const uint32_t kBasaltWideRightColor = BASALT_RGBA(153, 51, 230, 255);
 
 /* The quad layer: LOCAL pose (0, head height, -distance), identity
  * orientation, square size. */

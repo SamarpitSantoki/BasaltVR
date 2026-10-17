@@ -1017,10 +1017,18 @@ bool connectSocketLocked(uint16_t port) {
         gWsaStarted = true;
     }
 
-    const SOCKET connection = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    // Never inheritable: a game that launches its successor with
+    // CreateProcess(bInheritHandles=TRUE) and exits (The Lab -> Robot Repair
+    // via OpenComposite's LaunchInternalProcess) would otherwise leave this
+    // connection open inside the child, so the streamer never sees the old
+    // session end. socket() handles are inheritable by default.
+    const SOCKET connection = WSASocketW(
+        AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0,
+        WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
     if (connection == INVALID_SOCKET) {
         return false;
     }
+    SetHandleInformation(reinterpret_cast<HANDLE>(connection), HANDLE_FLAG_INHERIT, 0);
 
     const DWORD timeout = kSocketTimeoutMilliseconds;
     setsockopt(connection, SOL_SOCKET, SO_RCVTIMEO,

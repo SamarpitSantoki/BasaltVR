@@ -121,6 +121,9 @@ public final class RuntimeLink: @unchecked Sendable {
     /// scoped, so late completions after teardown are harmless.
     public var onFrame: ((_ frame: Frame, _ consumption: FrameConsumption) -> Void)?
     public var onTeardown: (() -> Void)?
+    /// A newer authenticated runtime session replaced the live one. Called on
+    /// the link's queue just before the old connection is torn down.
+    public var onReplaced: (() -> Void)?
     /// A runtime connection was refused (wrong protocol version or token,
     /// malformed Hello). Called on the link's queue with a readable reason.
     public var onProtocolError: ((String) -> Void)?
@@ -618,6 +621,7 @@ public final class RuntimeLink: @unchecked Sendable {
 
     private func promote(_ candidate: NWConnection, sessionId: UInt64, renderer: String,
                          remaining: Data) {
+        if connection != nil { onReplaced?() }
         dropConnection()
         connection = candidate
         receiveBuffer = remaining

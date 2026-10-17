@@ -1193,6 +1193,10 @@ public final class BottleManager: @unchecked Sendable {
             // it can never replace the original and relaunch itself.
             try copyFile(helper, to: backup)
         } else {
+            // The current shim, or a shim from another Basalt build (another
+            // checkout or worktree builds different bytes). Never preserve a
+            // shim as the original: the shim would then launch itself, and
+            // each launch would start another one (a process storm).
             guard fileManager.fileExists(atPath: backup.path) else {
                 throw BottleToolError(
                     "Steam UI compatibility is missing its preserved original helper")

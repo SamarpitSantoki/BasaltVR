@@ -376,6 +376,86 @@ bool renderImage(
                      "xrReleaseSwapchainImage");
 }
 
+// The float an RTV of `viewFormat` must be cleared to so that the stored
+// value reads back as the byte `encoded`: sRGB and float views take linear
+// values, UNORM views take the byte value itself.
+float clearValue(DXGI_FORMAT viewFormat, uint32_t encoded) {
+    const double unit = static_cast<double>(encoded) / 255.0;
+    const bool linear = viewFormat == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
+                        viewFormat == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ||
+                        viewFormat == DXGI_FORMAT_R16G16B16A16_FLOAT;
+    return static_cast<float>(linear ? basaltSrgbToLinear(unit) : unit);
+}
+
+// Draws `color` (r,g,b,a bytes) into a texture through a typed RTV, the way
+// an engine writes a typeless render target.
+bool clearThroughView(
+    Harness& harness, ID3D11Texture2D* texture, DXGI_FORMAT viewFormat, uint32_t color) {
+    D3D11_RENDER_TARGET_VIEW_DESC description{};
+    description.Format = viewFormat;
+    description.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+    ID3D11RenderTargetView* view = nullptr;
+    if (!check(SUCCEEDED(harness.device->CreateRenderTargetView(texture, &description, &view)),
+               "CreateRenderTargetView over a typeless texture")) {
+        return false;
+    }
+    const FLOAT value[4] = {
+        clearValue(viewFormat, color & 0xffu),
+        clearValue(viewFormat, (color >> 8) & 0xffu),
+        clearValue(viewFormat, (color >> 16) & 0xffu),
+        static_cast<float>((color >> 24) & 0xffu) / 255.0f,
+    };
+    harness.context->ClearRenderTargetView(view, value);
+    release(view);
+    return true;
+}
+
+// Acquire, wait, draw through a typed RTV, release.
+bool renderThroughView(
+    Harness& harness, Swapchain& swapchain, DXGI_FORMAT viewFormat, uint32_t color) {
+    XrSwapchainImageAcquireInfo acquireInfo{};
+    acquireInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;
+    uint32_t index = 0;
+    XrSwapchainImageWaitInfo waitInfo{};
+    waitInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;
+    waitInfo.timeout = XR_INFINITE_DURATION;
+    XrSwapchainImageReleaseInfo releaseInfo{};
+    releaseInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
+    return succeeded(xrAcquireSwapchainImage(swapchain.handle, &acquireInfo, &index),
+                     "xrAcquireSwapchainImage(typeless)") &&
+           succeeded(xrWaitSwapchainImage(swapchain.handle, &waitInfo),
+                     "xrWaitSwapchainImage(typeless)") &&
+           clearThroughView(harness, swapchain.images[index], viewFormat, color) &&
+           succeeded(xrReleaseSwapchainImage(swapchain.handle, &releaseInfo),
+                     "xrReleaseSwapchainImage(typeless)");
+}
+
+// OpenComposite's DX11Compositor::CopyToSwapchain for an unflipped eye:
+// acquire, wait, CopySubresourceRegion of the whole game texture, release.
+bool copyLikeOpenComposite(Harness& harness, Swapchain& swapchain, ID3D11Texture2D* game) {
+    XrSwapchainImageAcquireInfo acquireInfo{};
+    acquireInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;
+    uint32_t index = 0;
+    XrSwapchainImageWaitInfo waitInfo{};
+    waitInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;
+    waitInfo.timeout = 500000000;
+    XrSwapchainImageReleaseInfo releaseInfo{};
+    releaseInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
+    if (!succeeded(xrAcquireSwapchainImage(swapchain.handle, &acquireInfo, &index),
+                   "OpenComposite-style acquire") ||
+        !succeeded(xrWaitSwapchainImage(swapchain.handle, &waitInfo),
+                   "OpenComposite-style wait")) {
+        return false;
+    }
+    D3D11_BOX box{};
+    box.right = swapchain.width;
+    box.bottom = swapchain.height;
+    box.back = 1;
+    harness.context->CopySubresourceRegion(swapchain.images[index], 0, 0, 0, 0, game, 0, &box);
+    return succeeded(xrReleaseSwapchainImage(swapchain.handle, &releaseInfo),
+                     "OpenComposite-style release");
+}
+
 struct Frame {
     XrTime displayTime = 0;
     XrView views[2]{};
@@ -516,7 +596,7 @@ bool testFormats(Harness& harness) {
     // Formats outside the advertised list must still be creatable.
     const int64_t extraFormats[] = {
         DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_R8G8B8A8_UNORM,
-        DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_D32_FLOAT};
+        DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16G16B16A16_UNORM, DXGI_FORMAT_D32_FLOAT};
     for (int64_t format : extraFormats) {
         formats.push_back(format);
     }
@@ -1010,6 +1090,92 @@ bool runScenarios(Harness& harness, Swapchain& left, Swapchain& right) {
         const XrCompositionLayerBaseHeader* layers[] = {projection.header()};
         if (!succeeded(endFrame(harness, frame, layers, 1),
                        "side-by-side scenario xrEndFrame")) {
+            return false;
+        }
+    }
+
+    // Source 2 through OpenComposite: a typeless game texture rendered
+    // through an sRGB RTV is copied into an sRGB swapchain per eye.
+    ID3D11Texture2D* game = nullptr;
+    {
+        D3D11_TEXTURE2D_DESC description{};
+        description.Width = BASALT_SOURCE2_EYE_WIDTH;
+        description.Height = BASALT_SOURCE2_EYE_HEIGHT;
+        description.MipLevels = 1;
+        description.ArraySize = 1;
+        description.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+        description.SampleDesc.Count = 1;
+        description.Usage = D3D11_USAGE_DEFAULT;
+        description.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        if (!check(SUCCEEDED(harness.device->CreateTexture2D(&description, nullptr, &game)),
+                   "CreateTexture2D(Source 2 typeless eye texture)")) {
+            return false;
+        }
+    }
+    Swapchain ocEyes[2];
+    bool copied = clearThroughView(
+        harness, game, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, kBasaltSource2Color);
+    for (Swapchain& eye : ocEyes) {
+        copied = copied &&
+                 createSwapchain(harness, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+                                 BASALT_SOURCE2_EYE_WIDTH, BASALT_SOURCE2_EYE_HEIGHT, 1, &eye);
+        copied = copied && copyLikeOpenComposite(harness, eye, game);
+    }
+    release(game);
+    if (!copied || !beginFrame(harness, &frame)) {
+        return false;
+    }
+    {
+        ProjectionLayer projection(
+            harness, frame, ocEyes[0], ocEyes[1], fullRect(ocEyes[0]), fullRect(ocEyes[1]));
+        const XrCompositionLayerBaseHeader* layers[] = {projection.header()};
+        if (!succeeded(endFrame(harness, frame, layers, 1),
+                       "OpenComposite typeless-copy scenario xrEndFrame")) {
+            return false;
+        }
+    }
+    // Destroying waits until the daemon consumed the frame. Freeing these two
+    // now keeps the later scenarios under the runtime's 16 live swapchains.
+    if (!destroySwapchain(ocEyes[0]) || !destroySwapchain(ocEyes[1])) {
+        return false;
+    }
+
+    // Typeless swapchains written through the application's typed RTVs.
+    struct TypelessEye {
+        DXGI_FORMAT format;
+        DXGI_FORMAT viewFormat;
+        uint32_t color;
+    };
+    const TypelessEye typelessFrames[2][2] = {
+        {{DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+          kBasaltTypelessLeftColor},
+         {DXGI_FORMAT_B8G8R8X8_TYPELESS, DXGI_FORMAT_B8G8R8X8_UNORM_SRGB,
+          kBasaltTypelessRightColor}},
+        {{DXGI_FORMAT_R10G10B10A2_TYPELESS, DXGI_FORMAT_R10G10B10A2_UNORM,
+          kBasaltWideLeftColor},
+         {DXGI_FORMAT_R16G16B16A16_TYPELESS, DXGI_FORMAT_R16G16B16A16_FLOAT,
+          kBasaltWideRightColor}},
+    };
+    for (const auto& eyes : typelessFrames) {
+        Swapchain typeless[2];
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+            if (!createSwapchain(harness, eyes[eye].format, 96, 80, 1, &typeless[eye])) {
+                return false;
+            }
+            harness.swapchains.push_back(typeless[eye]);
+            if (!renderThroughView(harness, typeless[eye], eyes[eye].viewFormat,
+                                   eyes[eye].color)) {
+                return false;
+            }
+        }
+        if (!beginFrame(harness, &frame)) {
+            return false;
+        }
+        ProjectionLayer projection(
+            harness, frame, typeless[0], typeless[1], fullRect(typeless[0]),
+            fullRect(typeless[1]));
+        const XrCompositionLayerBaseHeader* layers[] = {projection.header()};
+        if (!succeeded(endFrame(harness, frame, layers, 1), "typeless scenario xrEndFrame")) {
             return false;
         }
     }

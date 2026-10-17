@@ -342,6 +342,10 @@ struct BasaltStreamerApp {
             link.onTeardown = {
                 print("OpenXR runtime disconnected")
             }
+            link.onReplaced = {
+                print("OpenXR runtime: a new game session replaced the previous one "
+                      + "(e.g. The Lab launching Robot Repair)")
+            }
             link.onProtocolError = { reason in
                 fputs(RuntimeLink.connectionRefusedLogPrefix + reason + "\n", stderr)
             }

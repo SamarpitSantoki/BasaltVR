@@ -76,6 +76,7 @@ private struct BasaltCLI {
         [--proxy /path/basalt/openvr_api.dll] [--preset default|alyx] \
         [--ini KEY=VALUE ...]
       basaltctl [--root PATH] [--repo PATH] run PROFILE --control-file PATH [-- ARG ...]
+      basaltctl [--root PATH] [--repo PATH] steam start PROFILE [--log PATH]
 
     `bottle prepare` installs the Basalt DXMT fork and OpenXR runtime into an
     existing managed pinned-engine bottle. OpenComposite is deliberately supplied
@@ -115,6 +116,8 @@ private struct BasaltCLI {
                 try openCompositeCommand(&cursor, manager: manager)
             case "run":
                 try runCommand(&cursor, manager: manager)
+            case "steam":
+                try steamCommand(&cursor, manager: manager)
             default:
                 throw BottleToolError("Unknown command '\(command)'\n\n\(usage)")
             }
@@ -317,6 +320,43 @@ private struct BasaltCLI {
         guard result.status == 0 else {
             throw BottleToolError("Profile '\(profile)' exited with status \(result.status)")
         }
+    }
+
+    /// `steam start PROFILE`: installs the Steam web helper compatibility shim
+    /// (black Steam window fix), then starts Steam with the Basalt flags and
+    /// returns at once. Steam keeps running after this command ends.
+    private static func steamCommand(_ cursor: inout ArgumentCursor,
+                                     manager: BottleManager) throws {
+        let action = try cursor.require("steam action")
+        guard action == "start" else {
+            throw BottleToolError("Unknown steam action '\(action)' (use: start)")
+        }
+        let profile = try cursor.require("profile name")
+        let log = try cursor.value(after: "--log")
+        try rejectRemainder(cursor)
+        guard try manager.installSteamWebHelperCompatibility(forProfile: profile) != nil,
+              let command = try manager.steamBootstrapCommand(forProfile: profile) else {
+            throw BottleToolError("Profile '\(profile)' is not a Steam profile")
+        }
+        let process = Process()
+        process.executableURL = command.executable
+        process.arguments = command.arguments
+        process.currentDirectoryURL = command.currentDirectory
+        var environment = ProcessInfo.processInfo.environment
+        command.environment.forEach { environment[$0.key] = $0.value }
+        process.environment = environment
+        process.standardInput = FileHandle.nullDevice
+        if let log {
+            FileManager.default.createFile(atPath: log, contents: nil)
+            let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: log))
+            process.standardOutput = handle
+            process.standardError = handle
+        } else {
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+        }
+        try process.run()
+        print("Started Steam (pid \(process.processIdentifier))")
     }
 
     private static func rejectRemainder(_ cursor: ArgumentCursor) throws {
