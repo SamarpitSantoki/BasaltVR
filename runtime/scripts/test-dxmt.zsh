@@ -131,6 +131,7 @@ fi
     dxmt_iosurface_probe \
     dxmt_iosurface_pixel_source \
     frame_timer_probe \
+    opencomposite_frame_timing_smoke \
     steamwebhelper_compat
 
 # Keep the executable in a clean directory so an unrelated d3d11.dll beside the
@@ -260,6 +261,27 @@ WINEPREFIX=${wine_prefix} \
 WINEDEBUG=-all \
 MVK_CONFIG_LOG_LEVEL=0 \
     "${wine_root}/bin/wine" ./d3d11_compositor_smoke.exe
+
+# OpenComposite on the headless runtime: GetFrameTiming must report one present per
+# frame for old SteamVR Unity plugins too (IVRCompositor_013, 168-byte struct). A zero
+# there sends The Lab's Secret Shop to about 1 fps (opencomposite-patches/0005).
+opencomposite_dll=${OPENCOMPOSITE_DLL:-${build_dir}/opencomposite/out/openvr_api.dll}
+if [[ -f ${opencomposite_dll} ]]; then
+    oc_probe_dir=${build_dir}/dxmt/opencomposite-probe
+    rm -rf "${oc_probe_dir}"
+    mkdir -p "${oc_probe_dir}"
+    cp "${build_dir}/bin/opencomposite_frame_timing_smoke.exe" "${oc_probe_dir}/"
+    cp "${opencomposite_dll}" "${oc_probe_dir}/openvr_api.dll"
+    print 'initUsingVulkan=false' > "${oc_probe_dir}/opencomposite.ini"
+    pushd "${oc_probe_dir}" >/dev/null
+    WINEPREFIX=${wine_prefix} \
+    WINEDEBUG=-all \
+    MVK_CONFIG_LOG_LEVEL=0 \
+        "${wine_root}/bin/wine" ./opencomposite_frame_timing_smoke.exe
+    popd >/dev/null
+else
+    print "SKIP: OpenComposite frame-timing smoke (run runtime/scripts/build-opencomposite.zsh first)"
+fi
 
 # --- Basalt DXMT fork phase (runs when build-dxmt-fork.zsh has produced it) --
 fork_install=${build_dir}/dxmt/fork-install
