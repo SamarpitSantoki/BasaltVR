@@ -98,7 +98,9 @@ public enum StreamReport {
             + "drops encoder-busy \(snapshot.encoderBusyDrops), "
             + "compositor-busy \(snapshot.compositorBusyDrops), "
             + "rate-control \(snapshot.encoderDroppedFrames), "
-            + "network \(snapshot.networkDrops); "
+            + "network-busy \(snapshot.networkBusyDrops), "
+            + "network \(snapshot.networkDrops), "
+            + "awaiting-IDR \(snapshot.awaitingIDRDrops); "
             + "pose age at send \(milliseconds(snapshot.poseAgeAverageMilliseconds)) ms avg, "
             + "\(milliseconds(snapshot.poseAgeMaximumMilliseconds)) ms max"
     }

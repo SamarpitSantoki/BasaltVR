@@ -17,7 +17,14 @@ public final class PipelineStatistics: @unchecked Sendable {
         /// The Metal stereo composer was still working on the previous frame.
         case compositorBusy
         /// The encoded access unit could not be handed to the video socket.
+        /// This breaks the headset's reference chain and costs an IDR.
         case network
+        /// The video socket was still busy, so the frame was not encoded.
+        /// The reference chain stays intact.
+        case networkBusy
+        /// An encoded P-frame was discarded (or a frame not encoded) while
+        /// waiting for a recovery IDR after a loss.
+        case awaitingIDR
     }
 
     public struct Snapshot: Equatable, Sendable {
@@ -41,6 +48,8 @@ public final class PipelineStatistics: @unchecked Sendable {
         public var encoderBusyDrops: Int
         public var compositorBusyDrops: Int
         public var networkDrops: Int
+        public var networkBusyDrops: Int
+        public var awaitingIDRDrops: Int
         public var encodedFrames: Int
         public var encoderDroppedFrames: Int
         public var encodeAverageMilliseconds: Double?
@@ -55,7 +64,8 @@ public final class PipelineStatistics: @unchecked Sendable {
                     trackingBackwardTimestamps: Int = 0, runtimeFrames: Int = 0,
                     runtimeUntrackedFrames: Int = 0, runtimeRepeatedTimestamps: Int = 0,
                     encoderBusyDrops: Int = 0, compositorBusyDrops: Int = 0,
-                    networkDrops: Int = 0, encodedFrames: Int = 0,
+                    networkDrops: Int = 0, networkBusyDrops: Int = 0,
+                    awaitingIDRDrops: Int = 0, encodedFrames: Int = 0,
                     encoderDroppedFrames: Int = 0,
                     encodeAverageMilliseconds: Double? = nil,
                     encodeMaximumMilliseconds: Double? = nil,
@@ -72,6 +82,8 @@ public final class PipelineStatistics: @unchecked Sendable {
             self.encoderBusyDrops = encoderBusyDrops
             self.compositorBusyDrops = compositorBusyDrops
             self.networkDrops = networkDrops
+            self.networkBusyDrops = networkBusyDrops
+            self.awaitingIDRDrops = awaitingIDRDrops
             self.encodedFrames = encodedFrames
             self.encoderDroppedFrames = encoderDroppedFrames
             self.encodeAverageMilliseconds = encodeAverageMilliseconds
@@ -137,6 +149,8 @@ public final class PipelineStatistics: @unchecked Sendable {
         case .encoderBusy: current.encoderBusyDrops += 1
         case .compositorBusy: current.compositorBusyDrops += 1
         case .network: current.networkDrops += 1
+        case .networkBusy: current.networkBusyDrops += 1
+        case .awaitingIDR: current.awaitingIDRDrops += 1
         }
     }
 
