@@ -392,11 +392,24 @@ if [[ -f ${fork_install}/x86_64-windows/d3d11.dll && -f ${fork_install}/x86_64-u
     # arrive as the compositor's BGRA output with the expected pixels, the
     # direct BGRA path still exports the application's own surfaces, and
     # wait/release follow acquisition order.
+    runtime_log=${probe_dir}/runtime-log.$$
+    rm -f "${runtime_log}"
     run_control_gate "runtime compositor" \
-        --smoke ./d3d11_compositor_smoke.exe -- \
+        --smoke ./d3d11_compositor_smoke.exe \
+        BASALT_RUNTIME_LOG="${runtime_log}" -- \
         "${probe_dir}/basalt_control_test_daemon" \
-        --expect-frames 8 --compositor-scenarios \
+        --expect-frames 11 --compositor-scenarios \
         --view-width 512 --view-height 512
+    # BASALT_RUNTIME_LOG (a host path) receives the compositor diagnostics.
+    if ! grep -q 'compositor active' "${runtime_log}" ||
+        ! grep -q 'compositor frame 1: 1 layer(s), left eye draws projection\[fmt 29 view 29 96x80' \
+            "${runtime_log}"; then
+        print -u2 "FAIL: BASALT_RUNTIME_LOG lacks the compositor diagnostics"
+        cat "${runtime_log}" >&2 2>/dev/null || true
+        exit 1
+    fi
+    print "PASS: BASALT_RUNTIME_LOG records compositor activation and layer diagnostics"
+    rm -f "${runtime_log}"
 
     # The production streamer's RuntimeLink, not just the C test daemon, must
     # complete the same handshake, swapchain registration, ordered

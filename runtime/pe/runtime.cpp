@@ -6,10 +6,31 @@
 
 #include <openxr/openxr_reflection.h>
 
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 
 namespace {
+
+INIT_ONCE gRuntimeLogInit = INIT_ONCE_STATIC_INIT;
+SRWLOCK gRuntimeLogLock = SRWLOCK_INIT;
+FILE* gRuntimeLogFile = nullptr;
+
+BOOL CALLBACK openRuntimeLog(PINIT_ONCE, PVOID, PVOID*) {
+    char path[MAX_PATH]{};
+    const DWORD length = GetEnvironmentVariableA("BASALT_RUNTIME_LOG", path, sizeof(path));
+    if (length == 0 || length >= sizeof(path) - 2) {
+        return TRUE;
+    }
+    char windowsPath[MAX_PATH]{};
+    if (path[0] == '/') {
+        std::snprintf(windowsPath, sizeof(windowsPath), "Z:%s", path);
+    } else {
+        std::snprintf(windowsPath, sizeof(windowsPath), "%s", path);
+    }
+    gRuntimeLogFile = std::fopen(windowsPath, "a");
+    return TRUE;
+}
 
 constexpr uintptr_t kFirstInstanceHandle = static_cast<uintptr_t>(0x10000);
 constexpr uintptr_t kInstanceHandleStride = static_cast<uintptr_t>(0x10);
@@ -310,6 +331,24 @@ PFN_xrVoidFunction asVoidFunction(Function function) {
 }  // namespace
 
 namespace basalt {
+
+void runtimeLog(const char* format, ...) {
+    InitOnceExecuteOnce(&gRuntimeLogInit, openRuntimeLog, nullptr, nullptr);
+    char line[1024];
+    const int prefix = std::snprintf(
+        line, sizeof(line), "Basalt OpenXR [pid %lu]: ", GetCurrentProcessId());
+    va_list arguments;
+    va_start(arguments, format);
+    std::vsnprintf(line + prefix, sizeof(line) - prefix, format, arguments);
+    va_end(arguments);
+    AcquireSRWLockExclusive(&gRuntimeLogLock);
+    std::fprintf(stderr, "%s\n", line);
+    if (gRuntimeLogFile != nullptr) {
+        std::fprintf(gRuntimeLogFile, "%s\n", line);
+        std::fflush(gRuntimeLogFile);
+    }
+    ReleaseSRWLockExclusive(&gRuntimeLogLock);
+}
 
 bool isValidInstance(XrInstance instance) {
     if (instance == XR_NULL_HANDLE) {

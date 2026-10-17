@@ -25,6 +25,13 @@ constexpr uint32_t kMaxViewHeight = BASALT_CONTROL_MAX_VIEW_HEIGHT;
 // ALVR's hashed path ID for /user/hand/right/input/system/click.
 constexpr uint64_t kAlvrRightSystemClickPathId = 0x19729bd97073d474ULL;
 
+// Writes one "Basalt OpenXR: ..." diagnostic line to stderr and, when
+// BASALT_RUNTIME_LOG names a file (a Windows path, or a host path starting
+// with '/' which is opened through Wine's Z: drive), appends it there too. A
+// game that a launcher started (The Lab -> Robot Repair) has no stderr the
+// session log can see, so the file is the only record of its runtime.
+void runtimeLog(const char* format, ...);
+
 bool isValidInstance(XrInstance instance);
 bool isD3D11ExtensionEnabled(XrInstance instance);
 bool isVisibilityMaskExtensionEnabled(XrInstance instance);

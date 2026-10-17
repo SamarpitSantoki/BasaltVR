@@ -33,6 +33,7 @@ constexpr uint32_t kOutputImageCount = kOutputFrames * 2;
 // counts up from 0x30000 in 0x10 steps); each session takes a new one.
 constexpr uint64_t kOutputSwapchainIdBase = 0xb5a1'0c00'0000'0000ULL;
 constexpr DXGI_FORMAT kOutputFormat = DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+constexpr ULONGLONG kDiagnosticIntervalMs = 2000;
 constexpr float kNearPlaneMeters = 0.01f;
 constexpr float kFarPlaneMeters = 1000.0f;
 
@@ -143,6 +144,16 @@ struct CompositorState {
     bool registered = false;
     uint32_t nextSlot = 0;
     std::array<uint64_t, kOutputFrames> slotFrames{};
+    // Diagnostics, logged every kDiagnosticIntervalMs: frame and failure
+    // counts, the layer shapes, and one centre texel of the first eye's
+    // source and output, read back one interval later so it never stalls.
+    ULONGLONG nextDiagnosticTick = 0;
+    uint64_t composited = 0;
+    uint64_t sourceFailures = 0;
+    ID3D11Texture2D* sourceProbe = nullptr;
+    ID3D11Texture2D* outputProbe = nullptr;
+    uint32_t sourceProbeTexelBytes = 0;
+    uint64_t probeFrame = 0;
 };
 
 SRWLOCK gCompositorLock = SRWLOCK_INIT;
@@ -175,7 +186,7 @@ bool compileShader(
             return true;
         }
         if (errors != nullptr) {
-            std::fprintf(stderr, "Basalt OpenXR: compositor %s/%s: %.*s\n",
+            basalt::runtimeLog("compositor %s/%s: %.*s",
                          entryPoint, *profile,
                          static_cast<int>(errors->GetBufferSize()),
                          static_cast<const char*>(errors->GetBufferPointer()));
@@ -192,7 +203,7 @@ BOOL CALLBACK initializeShaders(PINIT_ONCE, PVOID, PVOID*) {
         compiler = LoadLibraryW(L"d3dcompiler_43.dll");
     }
     if (compiler == nullptr) {
-        std::fprintf(stderr, "Basalt OpenXR: compositor has no d3dcompiler DLL\n");
+        basalt::runtimeLog("compositor has no d3dcompiler DLL");
         return TRUE;
     }
     D3DCompileProc compile = nullptr;
@@ -220,6 +231,8 @@ BOOL CALLBACK initializeShaders(PINIT_ONCE, PVOID, PVOID*) {
 }
 
 void releaseStateLocked(CompositorState* state) {
+    release(state->sourceProbe);
+    release(state->outputProbe);
     for (ID3D11RenderTargetView*& view : state->outputViews) {
         release(view);
     }
@@ -353,7 +366,7 @@ bool ensureStateLocked(XrSession session) {
 
     InitOnceExecuteOnce(&gShaderInit, initializeShaders, nullptr, nullptr);
     if (!gShadersValid) {
-        std::fprintf(stderr, "Basalt OpenXR: compositor shaders unavailable\n");
+        basalt::runtimeLog("compositor shaders unavailable");
         return false;
     }
     gState.device = basalt::retainSessionDevice(session);
@@ -368,7 +381,7 @@ bool ensureStateLocked(XrSession session) {
     std::array<uint32_t, kOutputImageCount> iosurfaceIds{};
     if (!createPipelineLocked(&gState) ||
         !createOutputsLocked(&gState, &iosurfaceIds)) {
-        std::fprintf(stderr, "Basalt OpenXR: compositor resource setup failed\n");
+        basalt::runtimeLog("compositor resource setup failed");
         return false;
     }
     gState.swapchainId = kOutputSwapchainIdBase + gNextOutputGeneration++;
@@ -382,9 +395,8 @@ bool ensureStateLocked(XrSession session) {
         return false;
     }
     gState.failed = false;
-    std::fprintf(stderr,
-                 "Basalt OpenXR: compositor active (%ux%u, %u output images)\n",
-                 gState.width, gState.height, kOutputImageCount);
+    basalt::runtimeLog("compositor active (%ux%u, %u output images)",
+                       gState.width, gState.height, kOutputImageCount);
     return true;
 }
 
@@ -449,7 +461,126 @@ struct EyeDraw {
     basalt::SwapchainSampleSource source{};
     DrawConstants constants{};
     bool blend = false;
+    // For diagnostics only.
+    uint32_t arraySlice = 0;
+    XrRect2Di rect{};
 };
+
+uint32_t texelBytes(DXGI_FORMAT format) {
+    switch (format) {
+    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+    case DXGI_FORMAT_R16G16B16A16_FLOAT:
+    case DXGI_FORMAT_R16G16B16A16_UNORM:
+        return 8;
+    default:
+        return 4;
+    }
+}
+
+// Copies the mip-0 texel at the centre of `rect` into a new 1x1 staging
+// texture; the caller maps it later. Returns null if it cannot.
+ID3D11Texture2D* probeTexel(
+    ID3D11DeviceContext* context,
+    ID3D11Resource* resource,
+    uint32_t arraySlice,
+    const XrRect2Di& rect,
+    uint32_t* bytes) {
+    ID3D11Texture2D* texture = nullptr;
+    if (resource == nullptr ||
+        FAILED(resource->QueryInterface(__uuidof(ID3D11Texture2D),
+                                        reinterpret_cast<void**>(&texture)))) {
+        return nullptr;
+    }
+    D3D11_TEXTURE2D_DESC description{};
+    texture->GetDesc(&description);
+    const int64_t centerX = static_cast<int64_t>(rect.offset.x) + rect.extent.width / 2;
+    const int64_t centerY = static_cast<int64_t>(rect.offset.y) + rect.extent.height / 2;
+    const UINT x = static_cast<UINT>(
+        centerX < 0 ? 0 : (centerX >= description.Width ? description.Width - 1 : centerX));
+    const UINT y = static_cast<UINT>(
+        centerY < 0 ? 0 : (centerY >= description.Height ? description.Height - 1 : centerY));
+    D3D11_TEXTURE2D_DESC stagingDescription{};
+    stagingDescription.Width = 1;
+    stagingDescription.Height = 1;
+    stagingDescription.MipLevels = 1;
+    stagingDescription.ArraySize = 1;
+    stagingDescription.Format = description.Format;
+    stagingDescription.SampleDesc.Count = 1;
+    stagingDescription.Usage = D3D11_USAGE_STAGING;
+    stagingDescription.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ID3D11Device* device = nullptr;
+    texture->GetDevice(&device);
+    ID3D11Texture2D* probe = nullptr;
+    if (device == nullptr ||
+        FAILED(device->CreateTexture2D(&stagingDescription, nullptr, &probe))) {
+        release(device);
+        release(texture);
+        return nullptr;
+    }
+    release(device);
+    const D3D11_BOX box{x, y, 0, x + 1, y + 1, 1};
+    context->CopySubresourceRegion(
+        probe, 0, 0, 0, 0, texture,
+        D3D11CalcSubresource(0, arraySlice, description.MipLevels), &box);
+    release(texture);
+    *bytes = texelBytes(description.Format);
+    return probe;
+}
+
+// Formats a probe's bytes as hex (memory order) without waiting on the GPU.
+void describeProbe(
+    ID3D11DeviceContext* context, ID3D11Texture2D* probe, uint32_t bytes,
+    char* text, size_t size) {
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    const HRESULT result = probe == nullptr
+        ? E_POINTER
+        : context->Map(probe, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+    if (FAILED(result)) {
+        std::snprintf(text, size, "unavailable (0x%08lx)", static_cast<unsigned long>(result));
+        return;
+    }
+    const auto* data = static_cast<const uint8_t*>(mapped.pData);
+    size_t used = 0;
+    for (uint32_t index = 0; index < bytes && used + 3 < size; ++index) {
+        used += static_cast<size_t>(std::snprintf(
+            text + used, size - used, "%s%02x", index == 0 ? "" : " ", data[index]));
+    }
+    context->Unmap(probe, 0);
+}
+
+// Appends "kind fmt WxH image/slice rect (x,y wxh)" for one resolved draw.
+void describeDraw(const char* kind, const EyeDraw& draw, char* text, size_t size) {
+    const size_t used = std::strlen(text);
+    if (used + 1 >= size) {
+        return;
+    }
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    DXGI_FORMAT viewFormat = DXGI_FORMAT_UNKNOWN;
+    if (draw.source.view != nullptr) {
+        D3D11_SHADER_RESOURCE_VIEW_DESC viewDescription{};
+        draw.source.view->GetDesc(&viewDescription);
+        viewFormat = viewDescription.Format;
+        ID3D11Resource* resource = nullptr;
+        draw.source.view->GetResource(&resource);
+        ID3D11Texture2D* texture = nullptr;
+        if (resource != nullptr &&
+            SUCCEEDED(resource->QueryInterface(__uuidof(ID3D11Texture2D),
+                                               reinterpret_cast<void**>(&texture)))) {
+            D3D11_TEXTURE2D_DESC description{};
+            texture->GetDesc(&description);
+            format = description.Format;
+        }
+        release(texture);
+        release(resource);
+    }
+    std::snprintf(text + used, size - used,
+                  " %s[fmt %d view %d %ux%u slice %u rect %d,%d %dx%d%s%s]", kind,
+                  static_cast<int>(format), static_cast<int>(viewFormat),
+                  draw.source.width, draw.source.height, draw.arraySlice,
+                  draw.rect.offset.x, draw.rect.offset.y, draw.rect.extent.width,
+                  draw.rect.extent.height, draw.source.decodeSrgb ? " srgb-decode" : "",
+                  draw.blend ? " blend" : "");
+}
 
 // The D3D11 pipeline state the compositor overwrites on the game's context.
 // DXMT does not implement SwapDeviceContextState, so this is saved and
@@ -675,8 +806,11 @@ bool compositorSubmitFrame(
                 if (!retainSwapchainSampleSource(
                         subImage.swapchain, subImage.imageIndex,
                         subImage.imageArrayIndex, &draw.source)) {
+                    ++gState.sourceFailures;
                     continue;
                 }
+                draw.arraySlice = subImage.imageArrayIndex;
+                draw.rect = subImage.rect;
                 // The projection view keeps its pose and FOV in FrameReady,
                 // so it fills the whole output image.
                 const float fullscreen[4][4] = {
@@ -722,8 +856,11 @@ bool compositorSubmitFrame(
             if (!retainSwapchainSampleSource(
                     subImage.swapchain, subImage.imageIndex,
                     subImage.imageArrayIndex, &draw.source)) {
+                ++gState.sourceFailures;
                 continue;
             }
+            draw.arraySlice = subImage.imageArrayIndex;
+            draw.rect = subImage.rect;
             const XrPosef eyeFromQuad =
                 poseCompose(poseInvert(eyePoses[eye]), quadInEyeSpace);
             for (uint32_t corner = 0; corner < 4; ++corner) {
@@ -790,6 +927,53 @@ bool compositorSubmitFrame(
                 context->Draw(4, 0);
             }
         }
+
+        const ULONGLONG now = GetTickCount64();
+        if (now >= gState.nextDiagnosticTick) {
+            gState.nextDiagnosticTick = now + kDiagnosticIntervalMs;
+            // The previous interval's probes have long finished.
+            if (gState.probeFrame != 0) {
+                char sourceText[64] = "none";
+                char outputText[64] = "none";
+                if (gState.sourceProbe != nullptr) {
+                    describeProbe(context, gState.sourceProbe, gState.sourceProbeTexelBytes,
+                                  sourceText, sizeof(sourceText));
+                }
+                describeProbe(context, gState.outputProbe, 4, outputText, sizeof(outputText));
+                basalt::runtimeLog(
+                    "compositor frame %llu centre texel: left source [%s], left output BGRA [%s]",
+                    static_cast<unsigned long long>(gState.probeFrame), sourceText, outputText);
+            }
+            release(gState.sourceProbe);
+            release(gState.outputProbe);
+            char layers[768] = "";
+            for (uint32_t index = 0; index < drawCounts[0]; ++index) {
+                describeDraw(index == 0 && projection != nullptr ? "projection" : "quad",
+                             draws[0][index], layers, sizeof(layers));
+            }
+            basalt::runtimeLog(
+                "compositor frame %llu: %u layer(s), left eye draws%s; %llu frames "
+                "composited, %llu unusable sources",
+                static_cast<unsigned long long>(gState.composited + 1), frame.layerCount,
+                drawCounts[0] == 0 ? " none (black)" : layers,
+                static_cast<unsigned long long>(gState.composited),
+                static_cast<unsigned long long>(gState.sourceFailures));
+            if (drawCounts[0] > 0 && draws[0][0].source.view != nullptr) {
+                ID3D11Resource* resource = nullptr;
+                draws[0][0].source.view->GetResource(&resource);
+                gState.sourceProbe = probeTexel(
+                    context, resource, draws[0][0].arraySlice, draws[0][0].rect,
+                    &gState.sourceProbeTexelBytes);
+                release(resource);
+            }
+            uint32_t outputBytes = 0;
+            const XrRect2Di outputRect{
+                {0, 0},
+                {static_cast<int32_t>(gState.width), static_cast<int32_t>(gState.height)}};
+            gState.outputProbe = probeTexel(
+                context, gState.outputs[slot * 2], 0, outputRect, &outputBytes);
+            gState.probeFrame = gState.composited + 1;
+        }
         restoreContextState(context, &saved);
 
         ControlFrameView views[2]{};
@@ -807,6 +991,7 @@ bool compositorSubmitFrame(
         // immediate context, so the daemon reads only finished pixels.
         frameNumber = controlFrameReady(displayTime, trackingTimestamp, views, 2, false);
         if (frameNumber != 0) {
+            ++gState.composited;
             gState.slotFrames[slot] = frameNumber;
             gState.nextSlot = (slot + 1) % kOutputFrames;
         }

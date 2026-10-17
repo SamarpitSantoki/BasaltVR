@@ -51,6 +51,7 @@ target_link_libraries(
         d3d11
         dxgi
         dxguid
+        ws2_32
 )
 target_compile_definitions(d3d11_runtime_smoke PRIVATE XR_USE_GRAPHICS_API_D3D11)
 target_compile_options(d3d11_runtime_smoke PRIVATE -Wall -Wextra -Wpedantic)

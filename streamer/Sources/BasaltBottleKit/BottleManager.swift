@@ -1136,6 +1136,10 @@ public final class BottleManager: @unchecked Sendable {
               shim[shim.index(after: shim.startIndex)] == 0x5a else {
             throw BottleToolError("Steam UI compatibility artifact is not a Windows PE executable")
         }
+        guard Self.isSteamWebHelperShim(shim) else {
+            throw BottleToolError(
+                "Steam UI compatibility artifact is not Basalt's web helper shim")
+        }
 
         let candidates = [
             prefix.appendingPathComponent(
@@ -1166,7 +1170,7 @@ public final class BottleManager: @unchecked Sendable {
         }
         let installed = try Data(contentsOf: helper)
 
-        if installed != shim {
+        if installed != shim && !Self.isSteamWebHelperShim(installed) {
             guard installed.count >= 2, installed[installed.startIndex] == 0x4d,
                   installed[installed.index(after: installed.startIndex)] == 0x5a else {
                 throw BottleToolError("Steam's web helper is not a Windows PE executable")
@@ -1175,6 +1179,10 @@ public final class BottleManager: @unchecked Sendable {
             // Steam. Preserve that exact version for the shim to launch.
             try copyFile(helper, to: backup)
         } else {
+            // The current shim, or a shim from another Basalt build (another
+            // checkout or worktree builds different bytes). Never preserve a
+            // shim as the original: the shim would then launch itself, and
+            // each launch would start another one (a process storm).
             guard fileManager.fileExists(atPath: backup.path) else {
                 throw BottleToolError(
                     "Steam UI compatibility is missing its preserved original helper")
@@ -1186,10 +1194,28 @@ public final class BottleManager: @unchecked Sendable {
               original[original.index(after: original.startIndex)] == 0x5a else {
             throw BottleToolError("Steam's preserved web helper is not a Windows PE executable")
         }
+        guard !Self.isSteamWebHelperShim(original) else {
+            throw BottleToolError(
+                "Steam's preserved web helper (\(backup.lastPathComponent)) is a Basalt shim, "
+                    + "not Steam's helper. Put Steam's steamwebhelper.exe there "
+                    + "(from Steam/package/bins_webhelpers_win64.zip.vz.*, or reinstall Steam)")
+        }
         if installed != shim {
             try copyFile(artifact, to: helper)
         }
         return helper
+    }
+
+    /// The shim launches "steamwebhelper.basalt-original.exe" and holds that
+    /// name as a UTF-16 string; Steam's own helper never contains it. This
+    /// recognises every shim build, not only the bytes of the current one.
+    static func isSteamWebHelperShim(_ data: Data) -> Bool {
+        var marker = Data()
+        for unit in "steamwebhelper.basalt-original.exe".utf16 {
+            marker.append(UInt8(unit & 0xff))
+            marker.append(UInt8(unit >> 8))
+        }
+        return data.range(of: marker) != nil
     }
 
     public func steamBootstrapCommand(forProfile name: String) throws -> BottleLaunchCommand? {
