@@ -437,6 +437,8 @@ private final class FakeAlvrClient: @unchecked Sendable {
     private var sessions = 0
     private var serverKeepAlives = 0
     private var decoderConfigs = 0
+    private var lastDecoderConfig: Data?
+    private var lastStreamConfig: Data?
     private var videoPackets: [Int: Int] = [:]
 
     init() throws {
@@ -450,6 +452,9 @@ private final class FakeAlvrClient: @unchecked Sendable {
     var sessionCount: Int { locked { sessions } }
     var keepAlivesReceived: Int { locked { serverKeepAlives } }
     var decoderConfigsReceived: Int { locked { decoderConfigs } }
+    /// The newest `DecoderConfig` and `StreamConfig` payloads (unframed).
+    var latestDecoderConfig: Data? { locked { lastDecoderConfig } }
+    var latestStreamConfig: Data? { locked { lastStreamConfig } }
     func videoPacketsReceived(session: Int) -> Int { locked { videoPackets[session] ?? 0 } }
 
     /// The Quest slept or ALVR closed: both sockets go away.
@@ -497,7 +502,8 @@ private final class FakeAlvrClient: @unchecked Sendable {
         accepted.append(AlvrWire.littleEndian(Float(72).bitPattern))
         accepted.append(AlvrWire.littleEndian(UInt32(48_000)))
         guard AlvrWire.sendAll(AlvrWire.framed(accepted), to: control),
-              AlvrWire.receiveFrame(fd: control) != nil,          // StreamConfig
+              let streamConfig = AlvrWire.receiveFrame(fd: control), // StreamConfig
+              locked({ lastStreamConfig = streamConfig; return true }),
               AlvrWire.receiveFrame(fd: control) == Data([0, 0, 0, 0]), // StartStream
               AlvrWire.sendAll(AlvrWire.framed(Data([3, 0, 0, 0])), to: control), // StreamReady
               let stream = try? streamListener.accept() else { return }
@@ -519,7 +525,10 @@ private final class FakeAlvrClient: @unchecked Sendable {
                 if packet == Data([3, 0, 0, 0]) {
                     locked { serverKeepAlives += 1 }
                 } else if packet.first == 1 {
-                    locked { decoderConfigs += 1 }
+                    locked {
+                        decoderConfigs += 1
+                        lastDecoderConfig = packet
+                    }
                 }
             }
         }
@@ -575,16 +584,17 @@ final class AlvrReconnectEndToEndTests: XCTestCase {
         let events: Recorder
     }
 
-    private func makeHarness() throws -> Harness {
+    private func makeHarness(codec: VideoCodec = .h264) throws -> Harness {
         let client = try FakeAlvrClient()
-        let router = AlvrVideoStreamRouter()
+        let router = AlvrVideoStreamRouter(codec: codec)
         let events = Recorder()
         let request = AlvrClientSessionRequest(
             host: "127.0.0.1", controlPort: client.controlPort,
             streamPort: client.streamPort, localStreamPort: 0, wired: true,
             requestedViewWidth: 1152, requestedViewHeight: 1216,
             preferredRefreshRate: 72, latencyPreset: .low,
-            controllerPrediction: .full, trackingTimeoutNanoseconds: 2_000_000_000)
+            controllerPrediction: .full, codec: codec,
+            trackingTimeoutNanoseconds: 2_000_000_000)
         let supervisor = AlvrSessionSupervisor(
             initialAttemptLimit: 10, retryDelayNanoseconds: 100_000_000,
             reconnectDelayNanoseconds: 50_000_000
@@ -692,6 +702,44 @@ final class AlvrReconnectEndToEndTests: XCTestCase {
         let timestamp = try XCTUnwrap(router.timestampForVideoFrame())
         router.send(annexB: Self.parameterSetsIDR, isIDR: true, timestampNanoseconds: timestamp)
         XCTAssertTrue(waitUntil { client.videoPacketsReceived(session: 2) >= 1 })
+    }
+
+    /// An HEVC session: the StreamConfig names the codec, and an IDR sends
+    /// ALVR's DecoderConfig with CodecType::Hevc and the VPS+SPS+PPS buffer.
+    func testHEVCSessionSendsHEVCStreamConfigAndDecoderConfig() async throws {
+        let harness = try makeHarness(codec: .hevc)
+        let client = harness.client
+        let router = harness.router
+        defer {
+            harness.supervisor.stop()
+            client.stop()
+        }
+        try await harness.supervisor.startAndWaitForFirstSession()
+
+        let streamConfig = try XCTUnwrap(client.latestStreamConfig)
+        let sessionLength = Int(streamConfig.prefix(8).enumerated().reduce(UInt64(0)) {
+            $0 | (UInt64($1.element) << UInt64($1.offset * 8))
+        })
+        let session = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: streamConfig[8..<(8 + sessionLength)]) as? [String: Any])
+        let video = try XCTUnwrap(
+            (session["session_settings"] as? [String: Any])?["video"] as? [String: Any])
+        XCTAssertEqual(video["preferred_codec"] as? [String: String], ["variant": "Hevc"])
+
+        let parameterSets = Data([
+            0, 0, 0, 1, 0x40, 0x01, 0x0c, 0x01,   // VPS
+            0, 0, 0, 1, 0x42, 0x01, 0x01, 0x01,   // SPS
+            0, 0, 0, 1, 0x44, 0x01, 0xc0, 0x72,   // PPS
+        ])
+        let accessUnit = parameterSets + Data([0, 0, 0, 1, 0x28, 0x01, 0xaf, 0x2d]) // IDR_N_LP
+        let timestamp = try XCTUnwrap(router.timestampForVideoFrame())
+        router.send(annexB: accessUnit, isIDR: true, timestampNanoseconds: timestamp)
+        XCTAssertTrue(waitUntil { client.latestDecoderConfig != nil })
+        var expected = Data([1, 0, 0, 0, 1, 0, 0, 0])  // DecoderConfig, CodecType::Hevc
+        expected.append(contentsOf: [UInt8(parameterSets.count), 0, 0, 0, 0, 0, 0, 0])
+        expected.append(parameterSets)
+        XCTAssertEqual(client.latestDecoderConfig, expected)
+        XCTAssertTrue(waitUntil { client.videoPacketsReceived(session: 1) >= 1 })
     }
 }
 

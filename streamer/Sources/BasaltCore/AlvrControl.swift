@@ -291,10 +291,16 @@ public final class AlvrSessionHandshakeResult: @unchecked Sendable {
     }
 
     public func sendH264DecoderConfig(_ parameterSets: Data) {
+        sendDecoderConfig(parameterSets, codec: .h264)
+    }
+
+    /// Sends ALVR's `DecoderConfig`: the codec and the Annex-B parameter sets
+    /// that the Quest uses to (re)create its decoder.
+    public func sendDecoderConfig(_ parameterSets: Data, codec: VideoCodec) {
         guard streamReady, !parameterSets.isEmpty else { return }
         controlQueue.sync { [self] in
             guard !disconnected else { return }
-            try? AlvrControlProbe.sendH264DecoderConfig(parameterSets, to: socket)
+            try? AlvrControlProbe.sendDecoderConfig(parameterSets, codec: codec, to: socket)
         }
     }
 
@@ -428,7 +434,8 @@ public enum AlvrControlProbe {
         preferredRefreshRate: Float = 90,
         latencyPreset: StreamLatencyPreset = .balanced,
         wired: Bool = false,
-        controllerPrediction: ControllerPrediction = .full
+        controllerPrediction: ControllerPrediction = .full,
+        codec: VideoCodec = .h264
     ) async throws -> AlvrSessionHandshakeResult {
         try await Task.detached(priority: .utility) {
             try negotiateBlocking(host: host, port: port, timeoutSeconds: timeoutSeconds,
@@ -437,7 +444,8 @@ public enum AlvrControlProbe {
                                   preferredRefreshRate: preferredRefreshRate,
                                   latencyPreset: latencyPreset,
                                   wired: wired,
-                                  controllerPrediction: controllerPrediction)
+                                  controllerPrediction: controllerPrediction,
+                                  codec: codec)
         }.value
     }
 
@@ -455,7 +463,8 @@ public enum AlvrControlProbe {
                                           preferredRefreshRate: Float,
                                           latencyPreset: StreamLatencyPreset,
                                           wired: Bool,
-                                          controllerPrediction: ControllerPrediction) throws
+                                          controllerPrediction: ControllerPrediction,
+                                          codec: VideoCodec) throws
         -> AlvrSessionHandshakeResult {
         let fd = try openSocket(host: host, port: port, timeoutSeconds: timeoutSeconds)
         do {
@@ -482,7 +491,8 @@ public enum AlvrControlProbe {
                 settings = try AlvrNegotiatedSettings.beatSaberDefaults(for: capabilities)
             }
             let streamConfig = try AlvrStreamConfigEncoder.framedPacket(
-                settings: settings, wired: wired, controllerPrediction: controllerPrediction)
+                settings: settings, wired: wired, controllerPrediction: controllerPrediction,
+                codec: codec)
             do {
                 try writeExactly(streamConfig, to: fd,
                                  deadline: Date().addingTimeInterval(TimeInterval(timeoutSeconds)))
@@ -589,15 +599,24 @@ public enum AlvrControlProbe {
                          deadline: Date().addingTimeInterval(0.4))
     }
 
-    fileprivate static func sendH264DecoderConfig(_ parameterSets: Data,
-                                                  to fd: Int32) throws {
+    fileprivate static func sendDecoderConfig(_ parameterSets: Data, codec: VideoCodec,
+                                              to fd: Int32) throws {
+        try writeExactly(
+            framedPayload(decoderConfigPayload(parameterSets: parameterSets, codec: codec)),
+            to: fd, deadline: Date().addingTimeInterval(0.4))
+    }
+
+    /// Bincode `ServerControlPacket::DecoderConfig(DecoderInitializationConfig
+    /// { codec, config_buffer })` (`alvr/packets/src/lib.rs`): variant 1 and
+    /// the `CodecType` as little-endian u32, then the buffer as a
+    /// little-endian u64 length and bytes.
+    static func decoderConfigPayload(parameterSets: Data, codec: VideoCodec) -> Data {
         var payload = Data()
         appendLittleEndian(UInt32(1), to: &payload) // ServerControlPacket::DecoderConfig
-        appendLittleEndian(UInt32(0), to: &payload) // CodecType::H264
+        appendLittleEndian(codec.alvrCodecType, to: &payload) // CodecType
         appendLittleEndian(UInt64(parameterSets.count), to: &payload)
         payload.append(parameterSets)
-        try writeExactly(framedPayload(payload), to: fd,
-                         deadline: Date().addingTimeInterval(0.4))
+        return payload
     }
 
     private static func appendLittleEndian<T: FixedWidthInteger>(_ value: T,
