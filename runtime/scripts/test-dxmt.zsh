@@ -131,6 +131,7 @@ fi
     dxmt_iosurface_probe \
     dxmt_iosurface_pixel_source \
     frame_timer_probe \
+    dxmt_msaa_probe \
     opencomposite_frame_timing_smoke \
     steamwebhelper_compat
 
@@ -144,6 +145,7 @@ cp "${build_dir}/bin/dxmt_iosurface_pixel_source.exe" "${probe_dir}/dxmt_iosurfa
 cp "${build_dir}/bin/d3d11_runtime_smoke.exe" "${probe_dir}/d3d11_runtime_smoke.exe"
 cp "${build_dir}/bin/d3d11_compositor_smoke.exe" "${probe_dir}/d3d11_compositor_smoke.exe"
 cp "${build_dir}/bin/frame_timer_probe.exe" "${probe_dir}/frame_timer_probe.exe"
+cp "${build_dir}/bin/dxmt_msaa_probe.exe" "${probe_dir}/dxmt_msaa_probe.exe"
 
 # An already-created disposable prefix may contain older generated built-ins.
 # Keep its Windows view in sync with the overlay before running the probe.
@@ -237,6 +239,15 @@ WINEARCH=win64 \
 WINEDEBUG=-all \
     "${wine_root}/bin/wine" ./frame_timer_probe.exe
 
+# Stock v0.80 rejects 8x MSAA textures on GPUs that stop at 4x (all Apple
+# GPUs); the fork phase below must pass the same probe.
+if WINEPREFIX=${wine_prefix} WINEARCH=win64 WINEDEBUG=-all MVK_CONFIG_LOG_LEVEL=0 \
+    "${wine_root}/bin/wine" ./dxmt_msaa_probe.exe >/dev/null 2>&1; then
+    print "NOTE: stock DXMT passes the 8x MSAA probe (this GPU supports 8x MSAA)"
+else
+    print "PASS: stock DXMT ${dxmt_version} fails the 8x MSAA probe on this GPU (expected; the fork fixes it)"
+fi
+
 # Stock DXMT must not expose the Basalt IOSurface private data.
 WINEPREFIX=${wine_prefix} \
 WINEARCH=win64 \
@@ -303,6 +314,12 @@ if [[ -f ${fork_install}/x86_64-windows/d3d11.dll && -f ${fork_install}/x86_64-u
     system32=${wine_prefix}/drive_c/windows/system32
     fork_overlay_active=true
     overlay_dxmt "${fork_install}/x86_64-windows" "${fork_install}/x86_64-unix"
+
+    # 8x MSAA (Source 2 Auto-Fidelity): the fork falls back to the largest
+    # sample count Metal supports (patch 0006); stock v0.80 fails to create
+    # the targets on Apple GPUs, which left Robot Repair's eye texture empty.
+    WINEPREFIX=${wine_prefix} WINEARCH=win64 WINEDEBUG=-all MVK_CONFIG_LOG_LEVEL=0 \
+        "${wine_root}/bin/wine" ./dxmt_msaa_probe.exe
 
     # Fork with the gate off must be indistinguishable from stock.
     WINEPREFIX=${wine_prefix} WINEARCH=win64 WINEDEBUG=-all MVK_CONFIG_LOG_LEVEL=0 \
