@@ -272,38 +272,6 @@ final class AlvrSessionSupervisorTests: XCTestCase {
         let ignored = await mailbox.next()
         XCTAssertNil(ignored)
     }
-
-    func testIdleFillerRunsOnlyWhileAClientWaitsAndTheRuntimeIsIdle() {
-        let filler = RuntimeIdleVideoFiller(
-            idleThresholdNanoseconds: 500, intervalNanoseconds: 100)
-        // Nothing to feed: no client, or no fresh Quest tracking.
-        XCTAssertNil(filler.fillerTimestamp(now: 1_000, latestTrackingTimestamp: 50,
-                                            hasStream: false))
-        XCTAssertNil(filler.fillerTimestamp(now: 1_000, latestTrackingTimestamp: nil,
-                                            hasStream: true))
-        // The game has never submitted a frame: filler starts at once and
-        // repeats at the interval with newer tracking only.
-        XCTAssertEqual(filler.fillerTimestamp(now: 1_000, latestTrackingTimestamp: 50,
-                                              hasStream: true), 50)
-        XCTAssertNil(filler.fillerTimestamp(now: 1_050, latestTrackingTimestamp: 60,
-                                            hasStream: true))
-        XCTAssertNil(filler.fillerTimestamp(now: 1_100, latestTrackingTimestamp: 50,
-                                            hasStream: true))
-        XCTAssertEqual(filler.fillerTimestamp(now: 1_150, latestTrackingTimestamp: 70,
-                                              hasStream: true), 70)
-
-        // A game frame located before the last filler frame would make the
-        // encoder's time run backwards; a newer one resumes the game.
-        XCTAssertFalse(filler.admitRuntimeFrame(trackingTimestampNanoseconds: 70, now: 1_160))
-        XCTAssertTrue(filler.admitRuntimeFrame(trackingTimestampNanoseconds: 80, now: 1_170))
-        XCTAssertTrue(filler.admitRuntimeFrame(trackingTimestampNanoseconds: 75, now: 1_180))
-        // While the game renders there is no filler.
-        XCTAssertNil(filler.fillerTimestamp(now: 1_600, latestTrackingTimestamp: 90,
-                                            hasStream: true))
-        // The game stalls (loading): filler resumes after the threshold.
-        XCTAssertEqual(filler.fillerTimestamp(now: 1_680, latestTrackingTimestamp: 95,
-                                              hasStream: true), 95)
-    }
 }
 
 // MARK: - Transport-level detection
@@ -620,9 +588,10 @@ final class AlvrReconnectEndToEndTests: XCTestCase {
 
     /// The reported failure: StreamReady, then no game frames for a long
     /// time (OpenComposite's probe session, the game loading), then the
-    /// client drops the session. The streamer must keep the client fed while
-    /// idle, notice the drop without a video write, and accept the client's
-    /// reconnect with a fresh IDR and decoder configuration.
+    /// client drops the session. The streamer must give the idle client a
+    /// decoder configuration and a picture, notice the drop without a video
+    /// write, and accept the client's reconnect with a fresh IDR and decoder
+    /// configuration.
     func testClientDropsWhileTheRuntimeIsIdleThenReconnects() async throws {
         let harness = try makeHarness()
         let client = harness.client
@@ -634,16 +603,27 @@ final class AlvrReconnectEndToEndTests: XCTestCase {
         try await harness.supervisor.startAndWaitForFirstSession()
         XCTAssertTrue(router.hasStream)
 
-        // Runtime idle: only the filler feeds the stream, at its own rate.
-        let filler = RuntimeIdleVideoFiller(
+        // Runtime idle, no game frame yet: the filler sends black until one
+        // black IDR is delivered, then stays quiet. ALVR keeps showing that
+        // picture; only control keepalives keep the session alive.
+        let gate = VideoLossRecoveryGate()
+        let filler = RuntimeIdleVideoFiller<Int>(
             idleThresholdNanoseconds: 100_000_000, intervalNanoseconds: 100_000_000)
         let fillerTask = Task.detached {
             while !Task.isCancelled {
-                if let timestamp = filler.fillerTimestamp(
+                if let frame = filler.nextFrame(
                     latestTrackingTimestamp: router.timestampForVideoFrame(),
-                    hasStream: router.hasStream) {
-                    router.send(annexB: Self.parameterSetsIDR, isIDR: true,
-                                timestampNanoseconds: timestamp)
+                    hasStream: router.hasStream,
+                    referenceChainBroken: gate.isAwaitingIDR) {
+                    XCTAssertFalse(frame.isRepeat, "no game frame exists yet")
+                    if gate.prepareEncode(transportBusy: false) == .encodeKeyframe,
+                       gate.admit(isIDR: true),
+                       router.send(annexB: Self.parameterSetsIDR, isIDR: true,
+                                   timestampNanoseconds: frame.trackingTimestampNanoseconds) {
+                        gate.idrDelivered()
+                        filler.recordDelivered(
+                            presentationNanoseconds: frame.presentationNanoseconds)
+                    }
                 }
                 try? await Task.sleep(nanoseconds: 20_000_000)
             }
@@ -652,8 +632,10 @@ final class AlvrReconnectEndToEndTests: XCTestCase {
         try await Task.sleep(nanoseconds: 1_500_000_000)
         XCTAssertGreaterThanOrEqual(client.keepAlivesReceived, 2,
                                     "ALVR drops a server that is silent for 2 s")
-        XCTAssertGreaterThanOrEqual(client.videoPacketsReceived(session: 1), 5)
+        XCTAssertEqual(client.videoPacketsReceived(session: 1), 1,
+                       "one delivered black IDR is enough; ALVR keeps the last picture")
         XCTAssertGreaterThanOrEqual(client.decoderConfigsReceived, 1)
+        XCTAssertTrue(router.hasStream)
 
         // The Quest sleeps / ALVR closes: no video write is needed to notice.
         fillerTask.cancel()
