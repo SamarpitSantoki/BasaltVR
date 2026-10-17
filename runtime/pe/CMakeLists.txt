@@ -12,6 +12,7 @@ add_library(
     space.cpp
     swapchain.cpp
     system.cpp
+    visibility_mask.cpp
 )
 
 target_include_directories(basalt_openxr PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
