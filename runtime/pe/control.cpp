@@ -78,6 +78,15 @@ struct ControllerInputRecord {
     XrVector3f rawAngularVelocity{};
 };
 
+// Latest HAND_SKELETON per hand, still in the raw Quest stage frame.
+struct HandSkeletonRecord {
+    bool tracked = false;
+    uint64_t questTimestamp = 0;
+    XrTime arrival = 0;
+    XrPosef rawJointPoses[basalt::kControlHandJointCount]{};
+    float jointRadii[basalt::kControlHandJointCount]{};
+};
+
 struct RecenterNotification {
     bool ready = false;
     XrSession session = XR_NULL_HANDLE;
@@ -135,6 +144,7 @@ XrTime gLatestPredictedDisplayTime = 0;
 XrTime gSystemButtonPressTime = 0;
 bool gSystemButtonRecentered = false;
 ControllerInputRecord gControllerInputs[2]{};
+HandSkeletonRecord gHandSkeletons[2]{};
 ButtonInputRecord gButtonInputs[basalt::kControlButtonCapacity]{};
 bool gViewConfigValid = false;
 float gViewConfigIpdMeters = 0.0f;
@@ -164,6 +174,9 @@ void resetInputsLocked() {
         record = {};
     }
     for (ButtonInputRecord& record : gButtonInputs) {
+        record = {};
+    }
+    for (HandSkeletonRecord& record : gHandSkeletons) {
         record = {};
     }
     resetSystemButtonLocked();
@@ -628,6 +641,75 @@ bool parseControllerMask(const uint8_t* payload, size_t payloadLength) {
     return true;
 }
 
+// HAND_SKELETON: u64 timestamp, u32 hand, u32 joint_valid_mask, then 26
+// joints of f32 orientation xyzw, f32 position xyz, f32 radius. The mask is
+// all-or-nothing; anything else is a protocol error.
+bool parseHandSkeleton(const uint8_t* payload, size_t payloadLength) {
+    constexpr uint32_t kAllJointsMask =
+        (1u << basalt::kControlHandJointCount) - 1u;
+    constexpr size_t kJointStride = 8 * sizeof(float);
+    static_assert(16 + basalt::kControlHandJointCount * kJointStride ==
+                      BASALT_CONTROL_HAND_SKELETON_PAYLOAD_LENGTH,
+                  "HAND_SKELETON payload layout");
+    static_assert(basalt::kControlHandJointCount == BASALT_CONTROL_HAND_JOINT_COUNT,
+                  "hand joint count");
+    if (payloadLength != BASALT_CONTROL_HAND_SKELETON_PAYLOAD_LENGTH) {
+        return false;
+    }
+    uint64_t timestamp = 0;
+    uint32_t hand = 0;
+    uint32_t validMask = 0;
+    std::memcpy(&timestamp, payload, sizeof(timestamp));
+    std::memcpy(&hand, payload + 8, sizeof(hand));
+    std::memcpy(&validMask, payload + 12, sizeof(validMask));
+    if (hand > 1 || (validMask != 0 && validMask != kAllJointsMask)) {
+        return false;
+    }
+    const bool tracked = validMask != 0;
+    XrPosef poses[basalt::kControlHandJointCount]{};
+    float radii[basalt::kControlHandJointCount]{};
+    if (tracked) {
+        for (uint32_t joint = 0; joint < basalt::kControlHandJointCount; ++joint) {
+            float values[8]{};
+            std::memcpy(values, payload + 16 + joint * kJointStride, sizeof(values));
+            for (float value : values) {
+                if (!std::isfinite(value)) {
+                    return false;
+                }
+            }
+            const double norm = std::sqrt(
+                static_cast<double>(values[0]) * values[0] +
+                static_cast<double>(values[1]) * values[1] +
+                static_cast<double>(values[2]) * values[2] +
+                static_cast<double>(values[3]) * values[3]);
+            if (norm < 0.5 || norm > 1.5 || !(values[7] > 0.0f) || values[7] > 0.1f) {
+                return false;
+            }
+            const float inverseNorm = static_cast<float>(1.0 / norm);
+            poses[joint].orientation = {
+                values[0] * inverseNorm, values[1] * inverseNorm,
+                values[2] * inverseNorm, values[3] * inverseNorm,
+            };
+            poses[joint].position = {values[4], values[5], values[6]};
+            radii[joint] = values[7];
+        }
+    }
+    // Like CONTROLLER_MOTION: an older sample, or any sample before the
+    // first head pose defines LOCAL, is accepted and ignored.
+    HandSkeletonRecord& record = gHandSkeletons[hand];
+    if (timestamp < record.questTimestamp || !gLocalOriginValid) {
+        return true;
+    }
+    record.questTimestamp = timestamp;
+    record.tracked = tracked;
+    record.arrival = tracked ? monotonicTime() : 0;
+    if (tracked) {
+        std::memcpy(record.rawJointPoses, poses, sizeof(poses));
+        std::memcpy(record.jointRadii, radii, sizeof(radii));
+    }
+    return true;
+}
+
 void markReceiverFailedLocked() {
     gReceiverFailed = true;
     gHeadPoseValid = false;
@@ -679,6 +761,8 @@ DWORD WINAPI receiverThreadProc(LPVOID) {
             accepted = parseViewConfig(payload, payloadLength);
         } else if (type == BASALT_MSG_CONTROLLER_MASK) {
             accepted = parseControllerMask(payload, payloadLength);
+        } else if (type == BASALT_MSG_HAND_SKELETON) {
+            accepted = parseHandSkeleton(payload, payloadLength);
         } else if (type == BASALT_MSG_FRAME_CONSUMED && payloadLength == 8) {
             uint64_t frameNumber = 0;
             std::memcpy(&frameNumber, payload, sizeof(frameNumber));
@@ -932,13 +1016,48 @@ DWORD WINAPI waiterThreadProc(LPVOID) {
     }
 }
 
-// Reads "<port> <token> [<per-eye width> <per-eye height>]" from the
-// BASALT_CONTROL file.
+bool isControlFileSpace(char value) {
+    return value == ' ' || value == '\t' || value == '\r' || value == '\n' ||
+           value == '\v' || value == '\f';
+}
+
+bool parseDecimal(const char* text, unsigned long maximum, unsigned long* value) {
+    if (text == nullptr || *text < '0' || *text > '9') {
+        return false;
+    }
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(text, &end, 10);
+    if (end == text || *end != '\0' || parsed > maximum) {
+        return false;
+    }
+    *value = parsed;
+    return true;
+}
+
+bool featureListContains(const char* features, const char* feature) {
+    const size_t featureLength = std::strlen(feature);
+    const char* cursor = features;
+    while (cursor != nullptr && *cursor != '\0') {
+        const char* comma = std::strchr(cursor, ',');
+        const size_t length = comma != nullptr
+            ? static_cast<size_t>(comma - cursor) : std::strlen(cursor);
+        if (length == featureLength && std::strncmp(cursor, feature, length) == 0) {
+            return true;
+        }
+        cursor = comma != nullptr ? comma + 1 : nullptr;
+    }
+    return false;
+}
+
+// Reads "<port> <token> [<per-eye width> <per-eye height>] [<features>]"
+// from the BASALT_CONTROL file. The optional features field starts with a
+// lowercase letter and lists comma-separated names; unknown ones are ignored.
 bool readControlFile(
     uint16_t* port,
     char token[BASALT_CONTROL_TOKEN_LENGTH + 1],
     uint32_t* viewWidth,
-    uint32_t* viewHeight) {
+    uint32_t* viewHeight,
+    bool* handTracking = nullptr) {
     char path[MAX_PATH]{};
     const DWORD pathLength =
         GetEnvironmentVariableA("BASALT_CONTROL", path, sizeof(path));
@@ -952,7 +1071,7 @@ bool readControlFile(
     if (file == INVALID_HANDLE_VALUE) {
         return false;
     }
-    char contents[128]{};
+    char contents[512]{};
     DWORD bytesRead = 0;
     const BOOL readOk = ReadFile(file, contents, sizeof(contents) - 1, &bytesRead, nullptr);
     CloseHandle(file);
@@ -961,26 +1080,62 @@ bool readControlFile(
     }
     contents[bytesRead] = '\0';
 
-    char tokenBuffer[64]{};
-    unsigned int parsedPort = 0;
-    unsigned int parsedWidth = 0;
-    unsigned int parsedHeight = 0;
-    char extra = '\0';
-    const int parsed = std::sscanf(
-        contents, "%u %63s %u %u %c", &parsedPort, tokenBuffer,
-        &parsedWidth, &parsedHeight, &extra);
-    if ((parsed != 2 && parsed != 4) ||
-        parsedPort == 0 || parsedPort > 65535 ||
-        std::strlen(tokenBuffer) != BASALT_CONTROL_TOKEN_LENGTH) {
+    // Split in place into at most five whitespace-separated fields.
+    constexpr size_t kMaxFields = 5;
+    const char* fields[kMaxFields]{};
+    size_t fieldCount = 0;
+    char* cursor = contents;
+    for (;;) {
+        while (isControlFileSpace(*cursor)) {
+            ++cursor;
+        }
+        if (*cursor == '\0') {
+            break;
+        }
+        if (fieldCount == kMaxFields) {
+            return false;
+        }
+        fields[fieldCount++] = cursor;
+        while (*cursor != '\0' && !isControlFileSpace(*cursor)) {
+            ++cursor;
+        }
+        if (*cursor != '\0') {
+            *cursor++ = '\0';
+        }
+    }
+    const char* features = nullptr;
+    if (fieldCount == 3 || fieldCount == 5) {
+        features = fields[fieldCount - 1];
+        if (*features < 'a' || *features > 'z') {
+            return false;
+        }
+        --fieldCount;
+    }
+    if (fieldCount != 2 && fieldCount != 4) {
+        return false;
+    }
+
+    unsigned long parsedPort = 0;
+    unsigned long parsedWidth = 0;
+    unsigned long parsedHeight = 0;
+    if (!parseDecimal(fields[0], 65535, &parsedPort) || parsedPort == 0 ||
+        std::strlen(fields[1]) != BASALT_CONTROL_TOKEN_LENGTH ||
+        (fieldCount == 4 &&
+         (!parseDecimal(fields[2], UINT32_MAX, &parsedWidth) ||
+          !parseDecimal(fields[3], UINT32_MAX, &parsedHeight)))) {
         return false;
     }
     *port = static_cast<uint16_t>(parsedPort);
-    std::memcpy(token, tokenBuffer, BASALT_CONTROL_TOKEN_LENGTH + 1);
+    std::memcpy(token, fields[1], BASALT_CONTROL_TOKEN_LENGTH + 1);
     if (viewWidth != nullptr) {
-        *viewWidth = parsed == 4 ? parsedWidth : 0;
+        *viewWidth = static_cast<uint32_t>(parsedWidth);
     }
     if (viewHeight != nullptr) {
-        *viewHeight = parsed == 4 ? parsedHeight : 0;
+        *viewHeight = static_cast<uint32_t>(parsedHeight);
+    }
+    if (handTracking != nullptr) {
+        *handTracking = features != nullptr &&
+            featureListContains(features, BASALT_CONTROL_FEATURE_HAND_TRACKING);
     }
     return true;
 }
@@ -1095,6 +1250,14 @@ bool controlConfiguredViewSize(uint32_t* width, uint32_t* height) {
     *width = configuredWidth;
     *height = configuredHeight;
     return true;
+}
+
+bool controlHandTrackingAdvertised() {
+    uint16_t port = 0;
+    char token[BASALT_CONTROL_TOKEN_LENGTH + 1]{};
+    bool handTracking = false;
+    return readControlFile(&port, token, nullptr, nullptr, &handTracking) &&
+           handTracking;
 }
 
 uint32_t queryTextureIOSurfaceId(ID3D11Texture2D* texture) {
@@ -1372,6 +1535,40 @@ bool controlInputSnapshot(
     }
     ReleaseSRWLockShared(&gControlLock);
     return connected;
+}
+
+bool controlHandSkeleton(
+    XrSession session,
+    uint32_t hand,
+    XrTime locateTime,
+    ControlHandSkeleton* out) {
+    if (out == nullptr) {
+        return false;
+    }
+    out->active = false;
+    if (hand > 1) {
+        return false;
+    }
+    const XrTime now = monotonicTime();
+    AcquireSRWLockShared(&gControlLock);
+    const HandSkeletonRecord& record = gHandSkeletons[hand];
+    const bool active = session != XR_NULL_HANDLE && gControlSession == session &&
+                        gSocket != INVALID_SOCKET && !gReceiverFailed &&
+                        record.tracked && record.arrival > 0 &&
+                        now >= record.arrival &&
+                        now - record.arrival <= kControllerPoseFreshness;
+    if (active) {
+        const XrPosef& localFromQuest = localTransformForTimeLocked(locateTime);
+        out->questTimestampNanoseconds = record.questTimestamp;
+        for (uint32_t joint = 0; joint < kControlHandJointCount; ++joint) {
+            out->jointPosesInLocal[joint] =
+                poseCompose(localFromQuest, record.rawJointPoses[joint]);
+            out->jointRadii[joint] = record.jointRadii[joint];
+        }
+    }
+    ReleaseSRWLockShared(&gControlLock);
+    out->active = active;
+    return active;
 }
 
 bool controlViewConfig(

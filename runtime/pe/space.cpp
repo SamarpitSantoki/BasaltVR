@@ -160,6 +160,56 @@ XrVector3f vectorAdd(const XrVector3f& a, const XrVector3f& b) {
     return {a.x + b.x, a.y + b.y, a.z + b.z};
 }
 
+// One consistent head and controller sample for a locate call; every space
+// in that call is resolved against it.
+struct TrackingSample {
+    bool headTracked = false;
+    XrPosef headInLocal{};
+    basalt::ControlInputSnapshot input{};
+};
+
+void sampleTracking(XrSession session, XrTime time, TrackingSample* sample) {
+    sample->headTracked = basalt::controlHeadPose(
+        session, time, nullptr, &sample->headInLocal);
+    basalt::controlInputSnapshot(session, &sample->input, time);
+}
+
+// Resolves an action space to its controller (hand 0/1, grip or aim); false
+// for reference spaces and for actions without a current pose binding.
+bool resolveActionSpace(const SpaceRecord& record, uint32_t* hand, bool* aim) {
+    *hand = UINT32_MAX;
+    *aim = false;
+    return record.kind == SpaceKind::kAction &&
+           basalt::getActionPoseSource(
+               record.session, record.action, record.subactionPath, hand, aim);
+}
+
+// LOCAL-from-space: LOCAL/STAGE are their creation offset, VIEW follows the
+// fresh head pose, and an action space follows its active controller.
+bool localFromSpace(
+    const SpaceRecord& record,
+    bool actionResolved,
+    uint32_t hand,
+    const TrackingSample& sample,
+    XrPosef* pose) {
+    if (record.kind == SpaceKind::kAction) {
+        if (!actionResolved || hand >= 2 || !sample.input.controllers[hand].poseActive) {
+            return false;
+        }
+        *pose = poseCompose(sample.input.controllers[hand].poseInLocal, record.pose);
+        return true;
+    }
+    if (isWorldReferenceSpace(record.referenceSpaceType)) {
+        *pose = record.pose;
+        return true;
+    }
+    if (!sample.headTracked) {
+        return false;
+    }
+    *pose = poseCompose(sample.headInLocal, record.pose);
+    return true;
+}
+
 }  // namespace
 
 namespace basalt {
@@ -339,12 +389,10 @@ XrResult XRAPI_CALL locateSpace(
     uint32_t baseHand = UINT32_MAX;
     bool targetAim = false;
     bool baseAim = false;
-    const bool targetActionResolved = target.kind == SpaceKind::kAction &&
-        getActionPoseSource(target.session, target.action, target.subactionPath,
-                            &targetHand, &targetAim);
-    const bool baseActionResolved = base.kind == SpaceKind::kAction &&
-        getActionPoseSource(base.session, base.action, base.subactionPath,
-                            &baseHand, &baseAim);
+    const bool targetActionResolved =
+        resolveActionSpace(target, &targetHand, &targetAim);
+    const bool baseActionResolved =
+        resolveActionSpace(base, &baseHand, &baseAim);
     XrSpaceVelocityFlags velocityFlags = 0;
     XrVector3f linearVelocity{};
     XrVector3f angularVelocity{};
@@ -376,36 +424,16 @@ XrResult XRAPI_CALL locateSpace(
         velocityFlags = XR_SPACE_VELOCITY_LINEAR_VALID_BIT |
                         XR_SPACE_VELOCITY_ANGULAR_VALID_BIT;
     } else {
-        XrPosef headInLocal{};
-        const bool headTracked = controlHeadPose(
-            target.session, time, nullptr, &headInLocal);
-        ControlInputSnapshot input{};
-        controlInputSnapshot(target.session, &input, time);
-
-        auto localFromSpace = [&](const SpaceRecord& record, bool actionResolved,
-                                  uint32_t hand, XrPosef* pose) -> bool {
-            if (record.kind == SpaceKind::kAction) {
-                if (!actionResolved || hand >= 2 || !input.controllers[hand].poseActive) {
-                    return false;
-                }
-                *pose = poseCompose(input.controllers[hand].poseInLocal, record.pose);
-                return true;
-            }
-            if (isWorldReferenceSpace(record.referenceSpaceType)) {
-                *pose = record.pose;
-                return true;
-            }
-            if (!headTracked) {
-                return false;
-            }
-            *pose = poseCompose(headInLocal, record.pose);
-            return true;
-        };
+        TrackingSample sample;
+        sampleTracking(target.session, time, &sample);
+        const ControlInputSnapshot& input = sample.input;
 
         XrPosef targetInLocal{};
         XrPosef baseInLocal{};
-        if (!localFromSpace(target, targetActionResolved, targetHand, &targetInLocal) ||
-            !localFromSpace(base, baseActionResolved, baseHand, &baseInLocal)) {
+        if (!localFromSpace(target, targetActionResolved, targetHand, sample,
+                            &targetInLocal) ||
+            !localFromSpace(base, baseActionResolved, baseHand, sample,
+                            &baseInLocal)) {
             location->locationFlags = 0;
             location->pose = identityPose();
             setChainedSpaceVelocity(
@@ -644,6 +672,38 @@ bool isSpaceForSession(XrSpace space, XrSession session) {
     const bool matches = record != nullptr && record->session == session;
     ReleaseSRWLockShared(&gSpaceLock);
     return matches;
+}
+
+bool locateSpaceInLocal(
+    XrSpace space,
+    XrSession expectedSession,
+    XrTime time,
+    XrPosef* poseInLocal) {
+    if (space == XR_NULL_HANDLE || poseInLocal == nullptr) {
+        return false;
+    }
+    AcquireSRWLockShared(&gSpaceLock);
+    const SpaceRecord* found = findSpaceLocked(space);
+    const bool matches = found != nullptr && found->session == expectedSession;
+    SpaceRecord record{};
+    if (matches) {
+        record = *found;
+    }
+    ReleaseSRWLockShared(&gSpaceLock);
+    if (!matches) {
+        return false;
+    }
+    if (record.kind == SpaceKind::kReference &&
+        isWorldReferenceSpace(record.referenceSpaceType)) {
+        *poseInLocal = record.pose;
+        return true;
+    }
+    uint32_t hand = UINT32_MAX;
+    bool aim = false;
+    const bool actionResolved = resolveActionSpace(record, &hand, &aim);
+    TrackingSample sample;
+    sampleTracking(record.session, time, &sample);
+    return localFromSpace(record, actionResolved, hand, sample, poseInLocal);
 }
 
 bool isPoseWellFormed(const XrPosef& pose) {

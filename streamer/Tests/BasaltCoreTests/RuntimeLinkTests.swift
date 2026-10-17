@@ -65,6 +65,11 @@ final class RuntimeLinkTests: XCTestCase {
                        Int(RuntimeLink.maximumDisplayPeriodNanoseconds))
         XCTAssertEqual(defines["DEFAULT_DISPLAY_PERIOD_NS"],
                        Int(RuntimeLink.defaultDisplayPeriodNanoseconds))
+        XCTAssertEqual(defines["HAND_JOINT_COUNT"], RuntimeLink.handJointCount)
+        XCTAssertEqual(defines["HAND_SKELETON_PAYLOAD_LENGTH"],
+                       RuntimeLink.handSkeletonPayloadLength)
+        XCTAssertTrue(header.contains(
+            "#define BASALT_CONTROL_FEATURE_HAND_TRACKING \"\(RuntimeLink.handTrackingFeature)\""))
 
         // BASALT_MSG_HELLO_ACK = 2 must mirror `case helloAck = 2`.
         let headerMessages = try values(#"BASALT_MSG_([A-Z_]+) = ([0-9]+),"#)

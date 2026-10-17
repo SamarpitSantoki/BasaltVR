@@ -49,6 +49,9 @@ public struct StreamerOptions: Equatable {
     /// The stream codec. Not part of a profile until HEVC has a headset A/B.
     public var codec = VideoCodec.h264
     public var controllerPrediction = ControllerPrediction.full
+    /// Quest optical hand tracking: skeletons for XR_EXT_hand_tracking and an
+    /// emulated Touch controller driven by gestures.
+    public var handTracking = true
 
     public init() {}
 
@@ -85,6 +88,12 @@ public struct StreamerOptions: Equatable {
                         full (default) asks the Quest to predict controllers
                         as far ahead as the head; alvr keeps ALVR's shorter
                         SteamVR-oriented controller prediction
+          --hand-tracking <on|off>
+                        on (default): when you put a controller down, the
+                        Quest's hand tracking drives that hand (pinch =
+                        trigger, fist = grip) and games get the hand
+                        skeleton through XR_EXT_hand_tracking; off ignores
+                        tracked hands
           --bind <ip>   address to listen on (default 127.0.0.1, i.e.
                         this machine only; 0.0.0.0 accepts LAN clients
                         and exposes your screen to the network)
@@ -193,6 +202,12 @@ public struct StreamerOptions: Equatable {
                     throw BasaltError("--controller-prediction expects full or alvr")
                 }
                 options.controllerPrediction = prediction
+            case "--hand-tracking":
+                switch try nextValue(for: flag).lowercased() {
+                case "on": options.handTracking = true
+                case "off": options.handTracking = false
+                default: throw BasaltError("--hand-tracking expects on or off")
+                }
             case "--bind":
                 let host = try nextValue(for: flag)
                 guard IPv4Address(host) != nil || IPv6Address(host) != nil else {

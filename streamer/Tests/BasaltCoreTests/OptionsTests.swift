@@ -159,6 +159,13 @@ final class OptionsTests: XCTestCase {
         XCTAssertThrowsError(try StreamerOptions.parse(["--controller-prediction", "none"]))
     }
 
+    func testHandTracking() throws {
+        XCTAssertEqual(try StreamerOptions.parse([])?.handTracking, true)
+        XCTAssertEqual(try StreamerOptions.parse(["--hand-tracking", "OFF"])?.handTracking, false)
+        XCTAssertEqual(try StreamerOptions.parse(["--hand-tracking", "on"])?.handTracking, true)
+        XCTAssertThrowsError(try StreamerOptions.parse(["--hand-tracking", "maybe"]))
+    }
+
     func testCodec() throws {
         XCTAssertEqual(try StreamerOptions.parse([])?.codec, .h264)
         XCTAssertEqual(try StreamerOptions.parse(["--codec", "HEVC"])?.codec, .hevc)
