@@ -1,8 +1,8 @@
 /*
  * Native test daemon for the BasaltVR control socket (docs/DXMT-INTEROP.md
  * §4). Plays the streamer daemon's role against the PE runtime under Wine:
- * listens on 127.0.0.1, writes "<port> <token> [<width> <height>]" to the
- * control file, then
+ * listens on 127.0.0.1, writes "<port> <token> [<width> <height>]
+ * [hand_tracking]" to the control file, then
  * validates the Hello handshake, swapchain registration (every IOSurfaceID
  * must resolve via IOSurfaceLookup with matching dimensions), FrameReady
  * consistency, and teardown. Exits 0 only if at least --expect-frames
@@ -11,6 +11,11 @@
  * Usage: basalt_control_test_daemon --control-file <path> [--expect-frames N]
  *        [--frame-delay-ms N] [--view-width N --view-height N]
  *        [--display-period-ns N] [--verify-clears | --compositor-scenarios]
+ *        [--hand-tracking]
+ *
+ * --hand-tracking lists the hand_tracking feature in the control file (the
+ * runtime then offers XR_EXT_hand_tracking) and arms two haptic markers that
+ * publish a left HAND_SKELETON and then mark the left hand untracked.
  *
  * --compositor-scenarios pairs with d3d11_compositor_smoke.exe: every
  * FrameReady is checked against basalt_compositor_scenarios.h by reading
@@ -92,6 +97,9 @@ static unsigned int g_view_width = 0;
 static unsigned int g_view_height = 0;
 /* HELLO_ACK display period; the runtime paces xrWaitFrame to it. */
 static uint64_t g_display_period_ns = BASALT_CONTROL_DEFAULT_DISPLAY_PERIOD_NS;
+static bool g_hand_tracking = false;
+static unsigned g_hand_skeletons_sent = 0;
+static unsigned g_hand_untracks_sent = 0;
 
 static uint16_t read_u16(const uint8_t* p) { uint16_t v; memcpy(&v, p, 2); return v; }
 static uint32_t read_u32(const uint8_t* p) { uint32_t v; memcpy(&v, p, 4); return v; }
@@ -171,6 +179,33 @@ static bool send_controller_motion(int fd, uint64_t timestamp, uint32_t hand) {
     memcpy(payload + 8, &hand, 4);
     memcpy(payload + 16, motion, sizeof(motion));
     return send_message(fd, BASALT_MSG_CONTROLLER_MOTION, payload, sizeof(payload));
+}
+
+/* The left skeleton's palm (joint 0) equals the left CONTROLLER_MOTION pose
+ * (identity orientation at -0.2, 1.2, -0.4); joint i sits at palm +
+ * (0.001 i, 0.002 i, -0.003 i) with identity orientation and radius
+ * 0.01 + 0.0001 i. d3d11_runtime_smoke.cpp checks the same numbers. A mask of
+ * zero marks the hand untracked and leaves the joints zeroed. */
+static bool send_hand_skeleton(int fd, uint64_t timestamp, uint32_t hand, bool tracked) {
+    uint8_t payload[BASALT_CONTROL_HAND_SKELETON_PAYLOAD_LENGTH] = {0};
+    const uint32_t mask = tracked ? (1u << BASALT_CONTROL_HAND_JOINT_COUNT) - 1u : 0u;
+    memcpy(payload, &timestamp, 8);
+    memcpy(payload + 8, &hand, 4);
+    memcpy(payload + 12, &mask, 4);
+    if (tracked) {
+        const float palm_x = hand == 0 ? -0.2f : 0.2f;
+        for (uint32_t joint = 0; joint < BASALT_CONTROL_HAND_JOINT_COUNT; ++joint) {
+            const float values[8] = {
+                0.0f, 0.0f, 0.0f, 1.0f,
+                palm_x + 0.001f * (float)joint,
+                1.2f + 0.002f * (float)joint,
+                -0.4f - 0.003f * (float)joint,
+                0.01f + 0.0001f * (float)joint,
+            };
+            memcpy(payload + 16 + joint * sizeof(values), values, sizeof(values));
+        }
+    }
+    return send_message(fd, BASALT_MSG_HAND_SKELETON, payload, sizeof(payload));
 }
 
 static bool send_controller_mask(int fd, uint64_t timestamp, uint32_t active_mask) {
@@ -261,6 +296,20 @@ static bool handle_haptic(int fd, const uint8_t* payload, size_t length) {
     if (duration != 0 && __builtin_fabsf(amplitude - 0.25f) < 0.0001f) {
         return send_controller_motion(fd, 4, 0) &&
                send_controller_mask(fd, 4, 1);
+    }
+    // Hand-tracking markers: publish the left skeleton (timestamp 5), then
+    // mark the left hand untracked (timestamp 6). An older skeleton follows
+    // the untrack and must not resurrect the hand.
+    if (g_hand_tracking && duration != 0 &&
+        __builtin_fabsf(amplitude - 0.625f) < 0.0001f) {
+        ++g_hand_skeletons_sent;
+        return send_hand_skeleton(fd, 5, 0, true);
+    }
+    if (g_hand_tracking && duration != 0 &&
+        __builtin_fabsf(amplitude - 0.75f) < 0.0001f) {
+        ++g_hand_untracks_sent;
+        return send_hand_skeleton(fd, 6, 0, false) &&
+               send_hand_skeleton(fd, 5, 0, true);  // stale: must be ignored
     }
     // Hold the right system click while publishing a turned head pose. This
     // deterministically exercises the runtime's Quest reset-view gesture and
@@ -826,6 +875,8 @@ int main(int argc, char** argv) {
             g_view_height = (unsigned int)strtoul(argv[++i], NULL, 10);
         } else if (strcmp(argv[i], "--display-period-ns") == 0 && i + 1 < argc) {
             g_display_period_ns = strtoull(argv[++i], NULL, 10);
+        } else if (strcmp(argv[i], "--hand-tracking") == 0) {
+            g_hand_tracking = true;
         } else {
             control_file = NULL;  // Reported as a usage error below.
             break;
@@ -839,7 +890,8 @@ int main(int argc, char** argv) {
         fprintf(stderr, "usage: %s --control-file <path> [--expect-frames N] "
                         "[--frame-delay-ms N] [--view-width N --view-height N] "
                         "[--display-period-ns N] "
-                        "[--verify-clears | --compositor-scenarios]\n",
+                        "[--verify-clears | --compositor-scenarios] "
+                        "[--hand-tracking]\n",
                 argv[0]);
         return 2;
     }
@@ -876,11 +928,14 @@ int main(int argc, char** argv) {
         perror("control file");
         return 1;
     }
+    fprintf(file, "%u %s", port, token);
     if (g_view_width > 0) {
-        fprintf(file, "%u %s %u %u\n", port, token, g_view_width, g_view_height);
-    } else {
-        fprintf(file, "%u %s\n", port, token);
+        fprintf(file, " %u %u", g_view_width, g_view_height);
     }
+    if (g_hand_tracking) {
+        fprintf(file, " %s", BASALT_CONTROL_FEATURE_HAND_TRACKING);
+    }
+    fprintf(file, "\n");
     fclose(file);
     printf("daemon: listening on 127.0.0.1:%u\n", port);
     fflush(stdout);
@@ -1051,12 +1106,25 @@ int main(int argc, char** argv) {
         return 0;
     }
     // 6 smoke haptics plus 11 OpenComposite-shaped values the runtime must
-    // normalize and deliver rather than reject.
-    if (g_haptics_received != 17) {
+    // normalize and deliver rather than reject, plus the two hand-tracking
+    // markers when enabled.
+    const uint64_t expected_haptics = g_hand_tracking ? 19 : 17;
+    if (g_haptics_received != expected_haptics) {
         fprintf(stderr,
-                "FAIL: received %" PRIu64 " haptic commands, expected exactly 17\n",
-                g_haptics_received);
+                "FAIL: received %" PRIu64 " haptic commands, expected exactly %" PRIu64 "\n",
+                g_haptics_received, expected_haptics);
         return 1;
+    }
+    if (g_hand_tracking) {
+        if (g_hand_skeletons_sent != 1 || g_hand_untracks_sent != 1) {
+            fprintf(stderr,
+                    "FAIL: hand-tracking markers: %u skeleton and %u untrack requests, "
+                    "expected 1 each\n",
+                    g_hand_skeletons_sent, g_hand_untracks_sent);
+            return 1;
+        }
+        printf("PASS: control daemon advertised hand_tracking and published a left "
+               "HAND_SKELETON, an untrack, and a stale skeleton on request\n");
     }
     if (!verify_open_composite_haptics()) {
         return 1;

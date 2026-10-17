@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include "control.hpp"
+
 #include <openxr/openxr_reflection.h>
 
 #include <cstdarg>
@@ -38,6 +40,7 @@ uintptr_t gNextInstanceHandle = kFirstInstanceHandle;
 XrInstance gLiveInstance = XR_NULL_HANDLE;
 bool gD3D11ExtensionEnabled = false;
 bool gVisibilityMaskExtensionEnabled = false;
+bool gHandTrackingExtensionEnabled = false;
 
 struct ExtensionDefinition {
     const char* name;
@@ -47,12 +50,36 @@ struct ExtensionDefinition {
 // Every extension needs a session, and sessions need D3D11, so all of them
 // are hidden together when the D3D11 capability gate fails.
 // XR_KHR_visibility_mask is implemented purely in software.
-constexpr ExtensionDefinition kExtensions[] = {
+// XR_EXT_hand_tracking is offered only when the streamer's control file lists
+// the hand_tracking feature: OpenComposite then routes skeletal input through
+// it, so a runtime that cannot get Quest hand skeletons must not claim it.
+constexpr ExtensionDefinition kAlwaysExtensions[] = {
     {XR_KHR_D3D11_ENABLE_EXTENSION_NAME, XR_KHR_D3D11_enable_SPEC_VERSION},
     {XR_KHR_VISIBILITY_MASK_EXTENSION_NAME, XR_KHR_visibility_mask_SPEC_VERSION},
 };
-constexpr uint32_t kExtensionCount =
-    static_cast<uint32_t>(sizeof(kExtensions) / sizeof(kExtensions[0]));
+constexpr ExtensionDefinition kHandTrackingExtension = {
+    XR_EXT_HAND_TRACKING_EXTENSION_NAME, XR_EXT_hand_tracking_SPEC_VERSION};
+constexpr uint32_t kMaxExtensionCount =
+    static_cast<uint32_t>(sizeof(kAlwaysExtensions) / sizeof(kAlwaysExtensions[0])) + 1;
+
+bool handTrackingAvailable() {
+    return basalt::isD3D11RuntimeAvailable() && basalt::controlHandTrackingAdvertised();
+}
+
+// Fills the extensions this process may enable right now; returns the count.
+uint32_t availableExtensions(ExtensionDefinition (&extensions)[kMaxExtensionCount]) {
+    if (!basalt::isD3D11RuntimeAvailable()) {
+        return 0;
+    }
+    uint32_t count = 0;
+    for (const ExtensionDefinition& extension : kAlwaysExtensions) {
+        extensions[count++] = extension;
+    }
+    if (basalt::controlHandTrackingAdvertised()) {
+        extensions[count++] = kHandTrackingExtension;
+    }
+    return count;
+}
 
 XrResult XRAPI_CALL basaltEnumerateInstanceExtensionProperties(
     const char* layerName,
@@ -66,7 +93,8 @@ XrResult XRAPI_CALL basaltEnumerateInstanceExtensionProperties(
         return XR_ERROR_API_LAYER_NOT_PRESENT;
     }
 
-    const uint32_t count = basalt::isD3D11RuntimeAvailable() ? kExtensionCount : 0;
+    ExtensionDefinition extensions[kMaxExtensionCount]{};
+    const uint32_t count = availableExtensions(extensions);
     *propertyCountOutput = count;
     if (propertyCapacityInput == 0) {
         return XR_SUCCESS;
@@ -85,10 +113,10 @@ XrResult XRAPI_CALL basaltEnumerateInstanceExtensionProperties(
     for (uint32_t index = 0; index < count; ++index) {
         std::strncpy(
             properties[index].extensionName,
-            kExtensions[index].name,
+            extensions[index].name,
             XR_MAX_EXTENSION_NAME_SIZE - 1);
         properties[index].extensionName[XR_MAX_EXTENSION_NAME_SIZE - 1] = '\0';
-        properties[index].extensionVersion = kExtensions[index].version;
+        properties[index].extensionVersion = extensions[index].version;
     }
     return XR_SUCCESS;
 }
@@ -143,6 +171,7 @@ XrResult XRAPI_CALL basaltCreateInstance(
     }
     bool enableD3D11 = false;
     bool enableVisibilityMask = false;
+    bool enableHandTracking = false;
     for (uint32_t index = 0; index < createInfo->enabledExtensionCount; ++index) {
         const char* extensionName = createInfo->enabledExtensionNames[index];
         if (extensionName == nullptr) {
@@ -152,7 +181,9 @@ XrResult XRAPI_CALL basaltCreateInstance(
         const bool isD3D11 = std::strcmp(extensionName, XR_KHR_D3D11_ENABLE_EXTENSION_NAME) == 0;
         const bool isVisibilityMask =
             std::strcmp(extensionName, XR_KHR_VISIBILITY_MASK_EXTENSION_NAME) == 0;
-        if (!isD3D11 && !isVisibilityMask) {
+        const bool isHandTracking =
+            std::strcmp(extensionName, XR_EXT_HAND_TRACKING_EXTENSION_NAME) == 0;
+        if (!isD3D11 && !isVisibilityMask && !isHandTracking) {
             std::fprintf(stderr, "Basalt OpenXR: unsupported enabled extension '%s'\n", extensionName);
             return XR_ERROR_EXTENSION_NOT_PRESENT;
         }
@@ -160,8 +191,13 @@ XrResult XRAPI_CALL basaltCreateInstance(
             std::fprintf(stderr, "Basalt OpenXR: D3D11 runtime support is unavailable\n");
             return XR_ERROR_EXTENSION_NOT_PRESENT;
         }
+        if (isHandTracking && !handTrackingAvailable()) {
+            std::fprintf(stderr, "Basalt OpenXR: hand tracking is not offered by the streamer\n");
+            return XR_ERROR_EXTENSION_NOT_PRESENT;
+        }
         enableD3D11 = enableD3D11 || isD3D11;
         enableVisibilityMask = enableVisibilityMask || isVisibilityMask;
+        enableHandTracking = enableHandTracking || isHandTracking;
     }
 
     AcquireSRWLockExclusive(&gInstanceLock);
@@ -176,6 +212,7 @@ XrResult XRAPI_CALL basaltCreateInstance(
     gLiveInstance = reinterpret_cast<XrInstance>(gNextInstanceHandle);
     gD3D11ExtensionEnabled = enableD3D11;
     gVisibilityMaskExtensionEnabled = enableVisibilityMask;
+    gHandTrackingExtensionEnabled = enableHandTracking;
     gNextInstanceHandle += kInstanceHandleStride;
     *instance = gLiveInstance;
     ReleaseSRWLockExclusive(&gInstanceLock);
@@ -195,8 +232,10 @@ XrResult XRAPI_CALL basaltDestroyInstance(XrInstance instance) {
     gLiveInstance = XR_NULL_HANDLE;
     gD3D11ExtensionEnabled = false;
     gVisibilityMaskExtensionEnabled = false;
+    gHandTrackingExtensionEnabled = false;
     ReleaseSRWLockExclusive(&gInstanceLock);
     basalt::invalidateSessionForInstance(instance);
+    basalt::invalidateHandTrackersForInstance(instance);
     basalt::invalidateInputForInstance(instance);
     basalt::invalidatePathsForInstance(instance);
     return XR_SUCCESS;
@@ -341,6 +380,16 @@ bool isVisibilityMaskExtensionEnabled(XrInstance instance) {
     return enabled;
 }
 
+bool isHandTrackingExtensionEnabled(XrInstance instance) {
+    if (instance == XR_NULL_HANDLE) {
+        return false;
+    }
+    AcquireSRWLockShared(&gInstanceLock);
+    const bool enabled = instance == gLiveInstance && gHandTrackingExtensionEnabled;
+    ReleaseSRWLockShared(&gInstanceLock);
+    return enabled;
+}
+
 XrResult XRAPI_CALL getInstanceProcAddr(
     XrInstance instance,
     const char* name,
@@ -431,6 +480,15 @@ XrResult XRAPI_CALL getInstanceProcAddr(
     } else if (std::strcmp(name, "xrGetVisibilityMaskKHR") == 0 &&
                isVisibilityMaskExtensionEnabled(instance)) {
         *function = asVoidFunction(getVisibilityMask);
+    } else if (std::strcmp(name, "xrCreateHandTrackerEXT") == 0 &&
+               isHandTrackingExtensionEnabled(instance)) {
+        *function = asVoidFunction(createHandTracker);
+    } else if (std::strcmp(name, "xrDestroyHandTrackerEXT") == 0 &&
+               isHandTrackingExtensionEnabled(instance)) {
+        *function = asVoidFunction(destroyHandTracker);
+    } else if (std::strcmp(name, "xrLocateHandJointsEXT") == 0 &&
+               isHandTrackingExtensionEnabled(instance)) {
+        *function = asVoidFunction(locateHandJoints);
     } else if (std::strcmp(name, "xrCreateSession") == 0) {
         *function = asVoidFunction(createSession);
     } else if (std::strcmp(name, "xrDestroySession") == 0) {

@@ -362,7 +362,8 @@ struct BasaltStreamerApp {
                 retainedOutputs: idleFiller == nil ? 0 : 1)
             let link = try RuntimeLink(
                 controlFilePath: controlFile,
-                recommendedViewSize: options.perEyeResolution)
+                recommendedViewSize: options.perEyeResolution,
+                handTracking: options.handTracking)
             // Replaced by the negotiated headset rate once the Quest connects.
             link.setDisplayRefreshRate(Float(options.fps))
             link.onHello = { sessionId, renderer in
@@ -661,7 +662,8 @@ struct BasaltStreamerApp {
               + (options.codec == .h264 ? " \(options.entropyMode.rawValue.uppercased())" : "")
               + ", periodic IDR every "
               + "\(options.keyframeIntervalSeconds) s, \(options.fps) fps target, "
-              + "\(options.controllerPrediction.rawValue) controller prediction"
+              + "\(options.controllerPrediction.rawValue) controller prediction, "
+              + "hand tracking \(options.handTracking ? "on" : "off")"
               + (options.profile.map { ", profile \($0.rawValue)" } ?? ""))
         if !encoder.rejectedProperties.isEmpty {
             print("  VideoToolbox ignored: " + encoder.rejectedProperties.joined(separator: ", "))
@@ -798,11 +800,39 @@ struct BasaltStreamerApp {
                 print("  calibrated desktop preview from headset IPD/FOV (IPD \(ipd) mm)")
             }
         }
+        // One router per ALVR session: it decides per hand whether the game
+        // sees the Touch controller or Quest hand tracking (an emulated Touch
+        // controller driven by gestures, plus the hand skeleton).
+        var routerOutputs = HandTrackingInputRouter.Outputs()
+        routerOutputs.controllerMotion = { timestamp, hand, motion in
+            runtimeLink?.publishControllerMotion(
+                timestampNanoseconds: timestamp, hand: hand, motion: motion)
+        }
+        routerOutputs.controllerMask = { timestamp, activeMask in
+            runtimeLink?.publishControllerMask(
+                timestampNanoseconds: timestamp, activeMask: activeMask)
+        }
+        routerOutputs.handSkeleton = { timestamp, hand, skeleton in
+            runtimeLink?.publishHandSkeleton(
+                timestampNanoseconds: timestamp, hand: hand, skeleton: skeleton)
+        }
+        routerOutputs.buttons = { entries in runtimeLink?.publishButtons(entries) }
+        routerOutputs.interactionProfile = { deviceID, profileID in
+            runtimeLink?.publishInteractionProfile(deviceID: deviceID, profileID: profileID)
+        }
+        routerOutputs.modeChanged = { hand, handTracked in
+            let name = hand == .left ? "left" : "right"
+            print(handTracked
+                ? "  \(name) hand: Quest hand tracking (pinch = trigger, fist = grip)"
+                : "  \(name) hand: Touch controller")
+        }
+        let handInput = HandTrackingInputRouter(
+            handTrackingEnabled: options.handTracking, outputs: routerOutputs)
         handshake.onButtons { entries in
-            runtimeLink?.publishButtons(entries)
+            handInput.handleClientButtons(entries)
         }
         handshake.onActiveInteractionProfile { deviceID, profileID in
-            runtimeLink?.publishInteractionProfile(deviceID: deviceID, profileID: profileID)
+            handInput.handleClientInteractionProfile(deviceID: deviceID, profileID: profileID)
         }
         let transportReporter = VideoTransportReporter(name: wired ? "USB" : "Wi-Fi")
         let audioReporter = AudioTransportReporter(name: wired ? "USB" : "Wi-Fi")
@@ -860,13 +890,8 @@ struct BasaltStreamerApp {
             runtimeLink?.publishHeadPose(
                 timestampNanoseconds: timestamp, pose: pose)
         }
-        videoSender.onControllerMotion = { timestamp, hand, motion in
-            runtimeLink?.publishControllerMotion(
-                timestampNanoseconds: timestamp, hand: hand, motion: motion)
-        }
-        videoSender.onControllerMask = { timestamp, activeMask in
-            runtimeLink?.publishControllerMask(
-                timestampNanoseconds: timestamp, activeMask: activeMask)
+        videoSender.onTrackingSample = { sample in
+            handInput.handleTracking(sample)
         }
         let logsHaptics = AlvrHapticsLog.isEnabled()
         if logsHaptics, runtimeLink != nil {

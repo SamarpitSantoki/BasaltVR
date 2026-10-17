@@ -41,6 +41,7 @@ void runtimeLog(const char* format, ...);
 bool isValidInstance(XrInstance instance);
 bool isD3D11ExtensionEnabled(XrInstance instance);
 bool isVisibilityMaskExtensionEnabled(XrInstance instance);
+bool isHandTrackingExtensionEnabled(XrInstance instance);
 bool isD3D11RuntimeAvailable();
 bool isValidSession(XrSession session);
 ID3D11Device* retainSessionDevice(XrSession session);
@@ -72,6 +73,15 @@ void queueReferenceSpaceChange(
     const XrPosef& poseInPreviousSpace);
 bool isSpaceForSession(XrSpace space, XrSession session);
 bool isPoseWellFormed(const XrPosef& pose);
+// LOCAL-from-space at time, exactly as xrLocateSpace resolves it: LOCAL and
+// STAGE are their creation pose, VIEW needs a fresh head pose, and an action
+// space needs its controller pose. False when space is not a live space of
+// expectedSession or cannot be located right now.
+bool locateSpaceInLocal(
+    XrSpace space,
+    XrSession expectedSession,
+    XrTime time,
+    XrPosef* poseInLocal);
 bool getSwapchainSubmitState(
     XrSwapchain swapchain,
     XrSession* session,
@@ -283,5 +293,18 @@ XrResult XRAPI_CALL releaseSwapchainImage(
     XrSwapchain swapchain,
     const XrSwapchainImageReleaseInfo* releaseInfo);
 void invalidateSwapchainForSession(XrSession session);
+
+// XR_EXT_hand_tracking (hand_tracking.cpp).
+XrResult XRAPI_CALL createHandTracker(
+    XrSession session,
+    const XrHandTrackerCreateInfoEXT* createInfo,
+    XrHandTrackerEXT* handTracker);
+XrResult XRAPI_CALL destroyHandTracker(XrHandTrackerEXT handTracker);
+XrResult XRAPI_CALL locateHandJoints(
+    XrHandTrackerEXT handTracker,
+    const XrHandJointsLocateInfoEXT* locateInfo,
+    XrHandJointLocationsEXT* locations);
+void invalidateHandTrackersForSession(XrSession session);
+void invalidateHandTrackersForInstance(XrInstance instance);
 
 }  // namespace basalt
