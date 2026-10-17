@@ -162,6 +162,12 @@ struct BasaltStreamerApp {
                     + "(\($0) loss(es) so far)"
             }
         }
+        // ALVR's client keeps showing its last decoded picture when no video
+        // arrives. While the game submits nothing, the filler only repairs
+        // what the headset shows: the last game image when it was not
+        // delivered or the chain broke, or black before the first game frame.
+        let idleFiller = (runtimeMode && headsetMode)
+            ? RuntimeIdleVideoFiller<RuntimeStereoComposer.ComposedFrame>() : nil
         let encoder = try VideoEncoder(
             width: encodedWidth,
             height: encodedHeight,
@@ -182,15 +188,23 @@ struct BasaltStreamerApp {
                 }
                 let delivered: Bool
                 if runtimeMode {
-                    guard let runtimeTrackingTimestamp =
+                    guard let presentation =
                             H264Encoder.questTrackingTimestampNanoseconds(from: capturePTS) else {
                         fputs("encoded runtime frame lost its Quest tracking timestamp\n", stderr)
                         noteVideoLoss("an encoded frame lost its Quest tracking timestamp")
                         return
                     }
+                    // A repeated game image is encoded at a later presentation
+                    // time but keeps its own frame's tracking timestamp, so the
+                    // client reprojects it with the pose it was rendered for.
+                    let runtimeTrackingTimestamp = idleFiller?.videoTimestamp(
+                        forPresentationNanoseconds: presentation) ?? presentation
                     delivered = alvrVideo.send(
                         annexB: annexB, isIDR: isKeyframe,
                         timestampNanoseconds: runtimeTrackingTimestamp)
+                    if delivered, alvrVideo.hasStream {
+                        idleFiller?.recordDelivered(presentationNanoseconds: presentation)
+                    }
                 } else {
                     delivered = alvrVideo.send(annexB: annexB, isIDR: isKeyframe)
                 }
@@ -283,26 +297,40 @@ struct BasaltStreamerApp {
             raise(SIGTERM)
         }
 
-        // ALVR expects SteamVR-like continuous video. While a client is
-        // attached but the game submits nothing (loading, between OpenXR
-        // sessions, or not started), send a cheap black frame instead.
-        let idleFiller = (runtimeMode && headsetMode) ? RuntimeIdleVideoFiller() : nil
+        // While a client is attached but the game submits nothing (a slow
+        // game, a hitch, loading, between OpenXR sessions, or not started),
+        // the idle filler re-sends the last game image when the headset does
+        // not have it, or sends black before the first game frame.
         var idleFillerTimer: DispatchSourceTimer?
         if let idleFiller {
             let blackFrame = try makeBlackFrame(width: encodedWidth, height: encodedHeight)
-            let fillerLog = ThrottledEventLog()
+            let blackLog = ThrottledEventLog()
+            let repeatLog = ThrottledEventLog()
             let timer = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
             timer.schedule(deadline: .now() + .milliseconds(50), repeating: .milliseconds(50))
             timer.setEventHandler {
-                guard let timestamp = idleFiller.fillerTimestamp(
+                guard alvrVideo.hasStream, !videoTransportBusy(), encoder.canAcceptFrame,
+                      let filler = idleFiller.nextFrame(
                         latestTrackingTimestamp: alvrVideo.timestampForVideoFrame(),
-                        hasStream: alvrVideo.hasStream),
+                        hasStream: alvrVideo.hasStream,
+                        referenceChainBroken: videoRecovery.isAwaitingIDR),
                       let pts = H264Encoder.presentationTime(
-                        questTrackingTimestampNanoseconds: timestamp) else { return }
-                guard !videoTransportBusy(), encoder.canAcceptFrame,
-                      encodeVideoFrame(blackFrame, pts, "idle filler", nil) else { return }
-                fillerLog.record {
-                    "OpenXR runtime idle: sent \($0) black filler frame(s) to keep ALVR's decoder fed"
+                        questTrackingTimestampNanoseconds: filler.presentationNanoseconds)
+                else { return }
+                switch filler {
+                case .black:
+                    guard encodeVideoFrame(blackFrame, pts, "idle filler", nil) else { return }
+                    blackLog.record {
+                        "OpenXR runtime idle with no game frame yet: sent \($0) black "
+                            + "filler frame(s)"
+                    }
+                case .repeatLast(let image, _, _):
+                    guard encodeVideoFrame(image.pixelBuffer, pts, "idle repeat",
+                                           { _ = image }) else { return }
+                    repeatLog.record {
+                        "OpenXR runtime idle: re-sent the last game image \($0) time(s) "
+                            + "(not delivered, or the headset needed an IDR)"
+                    }
                 }
             }
             timer.resume()
@@ -311,8 +339,10 @@ struct BasaltStreamerApp {
 
         var runtimeLink: RuntimeLink?
         if let controlFile = options.runtimeControlFile {
+            // One extra output holds the newest composed frame for idle repeats.
             let runtimeComposer = try RuntimeStereoComposer(
-                perEyeWidth: previewPerEyeWidth, height: previewPerEyeHeight)
+                perEyeWidth: previewPerEyeWidth, height: previewPerEyeHeight,
+                retainedOutputs: idleFiller == nil ? 0 : 1)
             let link = try RuntimeLink(
                 controlFilePath: controlFile,
                 recommendedViewSize: options.perEyeResolution,
@@ -321,14 +351,17 @@ struct BasaltStreamerApp {
             link.setDisplayRefreshRate(Float(options.fps))
             link.onHello = { sessionId, renderer in
                 print("OpenXR runtime connected (session \(sessionId), \(renderer))")
+                idleFiller?.discardHeldFrame()
                 encoder.forceKeyframe()
             }
             link.onTeardown = {
                 print("OpenXR runtime disconnected")
+                idleFiller?.discardHeldFrame()
             }
             link.onReplaced = {
                 print("OpenXR runtime: a new game session replaced the previous one "
                       + "(e.g. The Lab launching Robot Repair)")
+                idleFiller?.discardHeldFrame()
             }
             link.onProtocolError = { reason in
                 fputs(RuntimeLink.connectionRefusedLogPrefix + reason + "\n", stderr)
@@ -407,6 +440,9 @@ struct BasaltStreamerApp {
                     // finishes with this compositor output.
                     consumption.complete()
                     guard let composed else { return }
+                    idleFiller?.holdComposedFrame(
+                        composed,
+                        trackingTimestampNanoseconds: frame.questTrackingTimestampNanoseconds)
                     _ = encodeVideoFrame(composed.pixelBuffer, pts, "runtime") { _ = composed }
                 }
                 guard scheduled else {
@@ -493,6 +529,9 @@ struct BasaltStreamerApp {
                 if let session = session as? AlvrClientSession {
                     alvrVideo.uninstall(session.stream)
                 }
+                // The next client has its own pose history: start it on black
+                // until the game's next frame instead of a stale image.
+                idleFiller?.discardHeldFrame()
                 // INPUT_RESET: the game sees both controllers go inactive and
                 // head tracking go stale until the next session's samples.
                 sessionRuntimeLink?.resetInputs()
