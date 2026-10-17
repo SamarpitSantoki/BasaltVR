@@ -2,6 +2,20 @@ import Foundation
 import VideoToolbox
 import CoreMedia
 
+/// H.264 entropy coding. CABAC compresses better; ALVR's own encoders default
+/// to CAVLC. The Quest decode-time effect is a headset A/B measurement.
+public enum H264EntropyMode: String, CaseIterable, Sendable {
+    case cabac
+    case cavlc
+
+    var videoToolboxValue: CFString {
+        switch self {
+        case .cabac: return kVTH264EntropyMode_CABAC
+        case .cavlc: return kVTH264EntropyMode_CAVLC
+        }
+    }
+}
+
 /// Hardware H.264 encoder built on VideoToolbox, configured for low-latency
 /// frame-in/frame-out operation (the same mode MoltenVR advertises).
 ///
@@ -24,7 +38,21 @@ public final class H264Encoder {
 
     private static let startCode = Data([0x00, 0x00, 0x00, 0x01])
 
+    /// Called once per submitted frame when VideoToolbox finishes with it:
+    /// the submit-to-output time, and whether the encoder dropped the frame
+    /// instead of producing output. Low-latency rate control drops whole
+    /// frames when the content does not fit the bitrate target, so this
+    /// counter is how such drops become visible.
+    public var onFrameEncoded: ((_ durationNanoseconds: UInt64, _ droppedByEncoder: Bool) -> Void)?
+
+    /// Session properties that VideoToolbox refused when the session was
+    /// configured (for example, low-latency mode does not support
+    /// MaxFrameDelayCount on macOS 26). The session still works without them.
+    public private(set) var rejectedProperties: [String] = []
+
     public init(width: Int, height: Int, fps: Int, bitrate: Int,
+        keyframeIntervalSeconds: Int = 2,
+        entropyMode: H264EntropyMode = .cabac,
         output: @escaping Output) throws {
         self.output = output
         averageBitrate = bitrate
@@ -53,24 +81,36 @@ public final class H264Encoder {
         self.session = session
 
         // Individual property failures are non-fatal (low-latency mode
-        // rejects some keys on some OS versions); best-effort configure.
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime,
-                             value: kCFBooleanTrue)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel,
-                             value: kVTProfileLevel_H264_High_AutoLevel)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_H264EntropyMode,
-                             value: kVTH264EntropyMode_CABAC)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering,
-                             value: kCFBooleanFalse)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount,
-                             value: NSNumber(value: 1))
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
-                             value: kCFBooleanTrue)
-        Self.configureBitrate(session, bitrate: bitrate)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate,
-                             value: NSNumber(value: fps))
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
-                             value: NSNumber(value: fps * 2))
+        // rejects some keys on some OS versions); best-effort configure, but
+        // remember what was refused so the startup log can say so.
+        var rejected = [String]()
+        func set(_ key: CFString, _ value: CFTypeRef, _ name: String) {
+            if VTSessionSetProperty(session, key: key, value: value) != noErr {
+                rejected.append(name)
+            }
+        }
+        set(kVTCompressionPropertyKey_RealTime, kCFBooleanTrue, "RealTime")
+        set(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel,
+            "ProfileLevel")
+        set(kVTCompressionPropertyKey_H264EntropyMode, entropyMode.videoToolboxValue,
+            "H264EntropyMode")
+        set(kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse,
+            "AllowFrameReordering")
+        set(kVTCompressionPropertyKey_MaxFrameDelayCount, NSNumber(value: 1),
+            "MaxFrameDelayCount")
+        set(kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, kCFBooleanTrue,
+            "PrioritizeEncodingSpeedOverQuality")
+        if Self.configureBitrate(session, bitrate: bitrate) != noErr {
+            rejected.append("AverageBitRate")
+        }
+        set(kVTCompressionPropertyKey_ExpectedFrameRate, NSNumber(value: fps),
+            "ExpectedFrameRate")
+        let keyframeSeconds = max(1, keyframeIntervalSeconds)
+        set(kVTCompressionPropertyKey_MaxKeyFrameInterval,
+            NSNumber(value: fps * keyframeSeconds), "MaxKeyFrameInterval")
+        set(kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
+            NSNumber(value: keyframeSeconds), "MaxKeyFrameIntervalDuration")
+        rejectedProperties = rejected
         VTCompressionSessionPrepareToEncodeFrames(session)
     }
 
@@ -168,6 +208,7 @@ public final class H264Encoder {
             : nil
 
         var infoFlags = VTEncodeInfoFlags()
+        let submittedAt = DispatchTime.now().uptimeNanoseconds
         let status = VTCompressionSessionEncodeFrame(
             session,
             imageBuffer: pixelBuffer,
@@ -179,16 +220,24 @@ public final class H264Encoder {
                     completion?()
                     return
                 }
+                let dropped = status == noErr
+                    && (infoFlags.contains(.frameDropped) || sampleBuffer == nil)
                 self.lock.lock()
                 self.framesInFlight -= 1
+                // A forced IDR that rate control dropped must not be lost:
+                // the headset asked for it to recover, so the next frame
+                // carries the request instead.
+                if force && (dropped || status != noErr) { self.forceKeyframeFlag = true }
                 self.lock.unlock()
+                self.onFrameEncoded?(
+                    DispatchTime.now().uptimeNanoseconds &- submittedAt, dropped)
 
                 if status != noErr {
                     self.reportError("VideoToolbox encode callback failed", status: status)
                     completion?()
                     return
                 }
-                if !infoFlags.contains(.frameDropped), let sampleBuffer {
+                if !dropped, let sampleBuffer {
                     self.emit(sampleBuffer)
                 }
                 completion?()

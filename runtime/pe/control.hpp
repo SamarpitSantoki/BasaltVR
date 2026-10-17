@@ -39,6 +39,9 @@ bool controlConfiguredViewSize(uint32_t* width, uint32_t* height);
 // covers the GPU fence, control socket, compositor, and encoder admission
 // instead of allowing latency to accumulate in any of those queues.
 bool controlWaitForFrameBudget(XrSession session);
+// The headset refresh period the daemon sent in HELLO_ACK for this session;
+// 72 Hz while headless or for any other session.
+XrDuration controlDisplayPeriod(XrSession session);
 // Records a predictedDisplayTime returned by xrWaitFrame, so a later recenter
 // takes effect only after every frame the application may be rendering.
 void controlNotePredictedDisplayTime(XrSession session, XrTime predictedDisplayTime);

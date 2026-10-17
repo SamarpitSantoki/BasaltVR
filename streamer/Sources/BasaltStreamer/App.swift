@@ -148,11 +148,14 @@ struct BasaltStreamerApp {
         let latencyReporter = PipelineLatencyReporter()
         let headsetLatencyReporter = HeadsetLatencyReporter()
         let calibrationLogGate = CalibrationLogGate()
+        let pipelineStatistics = PipelineStatistics()
         let encoder = try H264Encoder(
             width: encodedWidth,
             height: encodedHeight,
             fps: options.fps,
-            bitrate: options.megabits * 1_000_000) { annexB, isKeyframe, capturePTS in
+            bitrate: options.megabits * 1_000_000,
+            keyframeIntervalSeconds: options.keyframeIntervalSeconds,
+            entropyMode: options.entropyMode) { annexB, isKeyframe, capturePTS in
                 if !runtimeMode {
                     latencyReporter.recordEncoded(capturePTS: capturePTS)
                 }
@@ -173,6 +176,9 @@ struct BasaltStreamerApp {
         encoder.onError = { error in
             fputs("encoder error: \(error.localizedDescription)\n", stderr)
         }
+        encoder.onFrameEncoded = { duration, dropped in
+            pipelineStatistics.recordEncode(durationNanoseconds: duration, droppedByEncoder: dropped)
+        }
         let streamRecovery = StreamRecoveryController(
             encoder: encoder,
             minimumIDRIntervalNanoseconds: options.wired
@@ -182,13 +188,19 @@ struct BasaltStreamerApp {
         // decode anything.
         server.onClientConnected = { encoder.forceKeyframe() }
         let droppedFrames = ThrottledEventLog()
+        // The throttled log shows the first and every 120th drop; the
+        // pipeline line counts every drop per interval.
+        let noteDrop: @Sendable (String, PipelineStatistics.DropStage) -> Void = { stage, kind in
+            droppedFrames.recordDroppedFrame(stage: stage)
+            pipelineStatistics.recordDrop(kind)
+        }
         let runtimeWrapFailures = ThrottledEventLog()
         capture.onFrame = { pixelBuffer, pts in
             // Avoid spending GPU time composing a stereo frame that the
             // bounded encoder cannot accept. `encode` repeats this check
             // atomically in case a slot changes between here and submission.
             guard encoder.canAcceptFrame else {
-                droppedFrames.recordDroppedFrame(stage: "encoder busy (capture)")
+                noteDrop("encoder busy (capture)", .encoderBusy)
                 return
             }
 
@@ -200,7 +212,7 @@ struct BasaltStreamerApp {
                 frame = pixelBuffer
             }
             guard encoder.encode(frame, pts: pts) else {
-                droppedFrames.recordDroppedFrame(stage: "encoder busy (capture)")
+                noteDrop("encoder busy (capture)", .encoderBusy)
                 return
             }
         }
@@ -216,6 +228,8 @@ struct BasaltStreamerApp {
             let link = try RuntimeLink(
                 controlFilePath: controlFile,
                 recommendedViewSize: options.perEyeResolution)
+            // Replaced by the negotiated headset rate once the Quest connects.
+            link.setDisplayRefreshRate(Float(options.fps))
             link.onHello = { sessionId, renderer in
                 print("OpenXR runtime connected (session \(sessionId), \(renderer))")
                 encoder.forceKeyframe()
@@ -227,8 +241,10 @@ struct BasaltStreamerApp {
                 fputs(RuntimeLink.connectionRefusedLogPrefix + reason + "\n", stderr)
             }
             link.onFrame = { frame, consumption in
+                pipelineStatistics.recordRuntimeFrame(
+                    trackingTimestampNanoseconds: frame.questTrackingTimestampNanoseconds)
                 guard encoder.canAcceptFrame else {
-                    droppedFrames.recordDroppedFrame(stage: "encoder busy (runtime)")
+                    noteDrop("encoder busy (runtime)", .encoderBusy)
                     consumption.complete()
                     return
                 }
@@ -270,12 +286,12 @@ struct BasaltStreamerApp {
                     guard encoder.encode(
                             composed.pixelBuffer, pts: pts,
                             completion: { _ = composed }) else {
-                        droppedFrames.recordDroppedFrame(stage: "encoder busy (runtime)")
+                        noteDrop("encoder busy (runtime)", .encoderBusy)
                         return
                     }
                 }
                 guard scheduled else {
-                    droppedFrames.recordDroppedFrame(stage: "compositor busy (runtime)")
+                    noteDrop("compositor busy (runtime)", .compositorBusy)
                     consumption.complete()
                     return
                 }
@@ -307,7 +323,8 @@ struct BasaltStreamerApp {
                             headsetLatencyReporter: headsetLatencyReporter,
                             calibrationLogGate: calibrationLogGate,
                             encoder: encoder,
-                            streamRecovery: streamRecovery)
+                            streamRecovery: streamRecovery,
+                            pipelineStatistics: pipelineStatistics)
                         probeGate.retain(connected.handshake, clientKey: clientKey)
                         succeeded = true
                     } catch {
@@ -336,7 +353,8 @@ struct BasaltStreamerApp {
                         headsetLatencyReporter: headsetLatencyReporter,
                         calibrationLogGate: calibrationLogGate,
                         encoder: encoder,
-                        streamRecovery: streamRecovery)
+                        streamRecovery: streamRecovery,
+                        pipelineStatistics: pipelineStatistics)
                     lastError = nil
                     break
                 } catch {
@@ -377,6 +395,13 @@ struct BasaltStreamerApp {
         } else if options.wired {
             print("  ALVR: USB via adb, TCP control \(AlvrDiscoveryListener.alvrPort)/video \(AlvrVideoStreamSender.defaultPort)")
         }
+        print("  encoder: \(options.entropyMode.rawValue.uppercased()), periodic IDR every "
+              + "\(options.keyframeIntervalSeconds) s, \(options.fps) fps target, "
+              + "\(options.controllerPrediction.rawValue) controller prediction"
+              + (options.profile.map { ", profile \($0.rawValue)" } ?? ""))
+        if !encoder.rejectedProperties.isEmpty {
+            print("  VideoToolbox ignored: " + encoder.rejectedProperties.joined(separator: ", "))
+        }
         if headsetMode {
             print("  stream settings: \(previewPerEyeWidth)x\(previewPerEyeHeight) per eye, "
                   + "\(options.latencyPreset.rawValue) latency")
@@ -392,10 +417,25 @@ struct BasaltStreamerApp {
         Ctrl-C to stop.
         """)
 
+        // Timer-driven, so a complete stall (no frames, no tracking) still
+        // prints a line with a growing tracking gap instead of going quiet.
+        var pipelineTimer: DispatchSourceTimer?
+        if headsetMode {
+            _ = pipelineStatistics.snapshot()
+            let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+            timer.schedule(deadline: .now() + .seconds(2), repeating: .seconds(2))
+            timer.setEventHandler {
+                print(StreamReport.pipelineLine(pipelineStatistics.snapshot()))
+            }
+            timer.resume()
+            pipelineTimer = timer
+        }
+
         // Capture and networking run on their own queues; park main until
         // SIGINT/SIGTERM, then tear down cleanly (stops the capture stream
         // and closes client sockets instead of dying mid-write).
         await ShutdownSignals().wait()
+        pipelineTimer?.cancel()
         print("\nShutting down…")
         discovery?.stop()
         runtimeLink?.stop()
@@ -429,7 +469,8 @@ struct BasaltStreamerApp {
         headsetLatencyReporter: HeadsetLatencyReporter,
         calibrationLogGate: CalibrationLogGate,
         encoder: H264Encoder,
-        streamRecovery: StreamRecoveryController
+        streamRecovery: StreamRecoveryController,
+        pipelineStatistics: PipelineStatistics
     ) async throws -> (handshake: AlvrSessionHandshakeResult, displayName: String) {
         let handshake = try await AlvrControlProbe.negotiateSession(
             host: host,
@@ -437,7 +478,8 @@ struct BasaltStreamerApp {
             requestedViewHeight: UInt32(requestedViewHeight),
             preferredRefreshRate: Float(options.fps),
             latencyPreset: options.latencyPreset,
-            wired: wired)
+            wired: wired,
+            controllerPrediction: options.controllerPrediction)
         guard case .accepted(let protocolId, let displayName, _, let capabilities) =
                 handshake.clientState else {
             throw BasaltError("ALVR headset is in standby")
@@ -455,6 +497,14 @@ struct BasaltStreamerApp {
             let negotiated = try requireNegotiatedSettings(handshake.negotiatedSettings)
             print("  prepared stereo desktop preview: \(negotiated.width)x\(negotiated.height) per eye "
                 + "@ \(String(format: "%.0f", negotiated.refreshRate)) Hz, H.264")
+            // The runtime paces xrWaitFrame to the rate the Quest displays,
+            // not to the requested --fps, so a 90 Hz headset gets 90 Hz frames.
+            if let runtimeLink, runtimeLink.setDisplayRefreshRate(negotiated.refreshRate) {
+                print("  OpenXR frame pacing: "
+                    + String(format: "%.0f Hz", negotiated.refreshRate)
+                    + (abs(negotiated.refreshRate - Float(options.fps)) >= 0.5
+                        ? " (closest headset rate to --fps \(options.fps))" : ""))
+            }
         } else {
             print("  headset did not provide streaming capabilities")
         }
@@ -497,13 +547,24 @@ struct BasaltStreamerApp {
         }
         videoSender.onFrameSent = { report in
             transportReporter.record(report)
+            if let age = report.trackingAgeNanoseconds {
+                pipelineStatistics.recordPoseAge(nanoseconds: age)
+            }
         }
         videoSender.onAudioSent = { report in
             audioReporter.record(report)
         }
+        videoSender.onTrackingTimestamp = { timestamp in
+            pipelineStatistics.recordTracking(timestampNanoseconds: timestamp)
+        }
         let networkDrops = ThrottledEventLog()
         videoSender.onFrameDropped = {
             networkDrops.record { "ALVR network busy: dropped \($0) stale video frame(s)" }
+            pipelineStatistics.recordDrop(.network)
+            // A dropped access unit leaves no gap in ALVR's packet index, so
+            // the Quest cannot notice it and keeps decoding P-frames against
+            // a missing reference. Ask for a (rate-limited) recovery IDR.
+            streamRecovery.requestIDR()
         }
         videoSender.onAudioDropped = {
             audioReporter.recordDrop()

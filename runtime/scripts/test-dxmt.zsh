@@ -373,12 +373,15 @@ if [[ -f ${fork_install}/x86_64-windows/d3d11.dll && -f ${fork_install}/x86_64-u
     cc -O2 -Wall -Wextra -framework IOSurface -framework CoreFoundation \
         -o "${probe_dir}/basalt_control_test_daemon" \
         "${runtime_dir}/tests/native/basalt_control_test_daemon.c"
+    # The daemon negotiates 90 Hz here, so xrWaitFrame must report the
+    # HELLO_ACK display period instead of the 72 Hz headless default.
     run_control_gate "control-socket" \
         BASALT_EXPECT_HEAD_POSE=1 \
-        BASALT_EXPECT_VIEW_WIDTH=1152 BASALT_EXPECT_VIEW_HEIGHT=1216 -- \
+        BASALT_EXPECT_VIEW_WIDTH=1152 BASALT_EXPECT_VIEW_HEIGHT=1216 \
+        BASALT_EXPECT_DISPLAY_PERIOD_NS=11111111 -- \
         "${probe_dir}/basalt_control_test_daemon" \
         --expect-frames 21 --verify-clears --frame-delay-ms 25 \
-        --view-width 1152 --view-height 1216
+        --view-width 1152 --view-height 1216 --display-period-ns 11111111
 
     # Runtime compositor gate: OpenComposite-shaped swapchains and layers
     # (sRGB RGBA, mipmapped, oversized, flipped, blended quads, quad-only)

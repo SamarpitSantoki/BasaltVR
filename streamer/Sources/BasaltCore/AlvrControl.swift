@@ -389,7 +389,8 @@ public enum AlvrControlProbe {
         requestedViewHeight: UInt32? = nil,
         preferredRefreshRate: Float = 90,
         latencyPreset: StreamLatencyPreset = .balanced,
-        wired: Bool = false
+        wired: Bool = false,
+        controllerPrediction: ControllerPrediction = .full
     ) async throws -> AlvrSessionHandshakeResult {
         try await Task.detached(priority: .utility) {
             try negotiateBlocking(host: host, port: port, timeoutSeconds: timeoutSeconds,
@@ -397,7 +398,8 @@ public enum AlvrControlProbe {
                                   requestedViewHeight: requestedViewHeight,
                                   preferredRefreshRate: preferredRefreshRate,
                                   latencyPreset: latencyPreset,
-                                  wired: wired)
+                                  wired: wired,
+                                  controllerPrediction: controllerPrediction)
         }.value
     }
 
@@ -414,7 +416,8 @@ public enum AlvrControlProbe {
                                           requestedViewHeight: UInt32?,
                                           preferredRefreshRate: Float,
                                           latencyPreset: StreamLatencyPreset,
-                                          wired: Bool) throws
+                                          wired: Bool,
+                                          controllerPrediction: ControllerPrediction) throws
         -> AlvrSessionHandshakeResult {
         let fd = try openSocket(host: host, port: port, timeoutSeconds: timeoutSeconds)
         do {
@@ -441,7 +444,7 @@ public enum AlvrControlProbe {
                 settings = try AlvrNegotiatedSettings.beatSaberDefaults(for: capabilities)
             }
             let streamConfig = try AlvrStreamConfigEncoder.framedPacket(
-                settings: settings, wired: wired)
+                settings: settings, wired: wired, controllerPrediction: controllerPrediction)
             do {
                 try writeExactly(streamConfig, to: fd,
                                  deadline: Date().addingTimeInterval(TimeInterval(timeoutSeconds)))
