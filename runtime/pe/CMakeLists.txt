@@ -7,6 +7,7 @@ add_library(
     entrypoints.cpp
     frame.cpp
     graphics.cpp
+    hand_tracking.cpp
     input.cpp
     path.cpp
     runtime.cpp

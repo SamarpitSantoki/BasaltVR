@@ -309,9 +309,11 @@ public final class AlvrVideoStreamSender: @unchecked Sendable {
     public var onCongestion: (() -> Void)?
     public var onStatistics: ((AlvrClientStatistics) -> Void)?
     public var onHeadPose: ((_ timestampNanoseconds: UInt64, _ pose: AlvrHeadPose) -> Void)?
-    public var onControllerMotion: ((_ timestampNanoseconds: UInt64, _ hand: AlvrHand,
-                                     _ motion: AlvrControllerMotion) -> Void)?
-    public var onControllerMask: ((_ timestampNanoseconds: UInt64, _ activeMask: UInt32) -> Void)?
+    /// Every complete tracking packet (shards joined): controller or hand
+    /// motions and hand skeletons. The head pose and timestamp also arrive
+    /// earlier, from the first shard, through `onHeadPose` and
+    /// `onTrackingTimestamp`.
+    public var onTrackingSample: ((AlvrTrackingSample) -> Void)?
     /// Every decoded tracking packet, with or without poses, in arrival order.
     public var onTrackingTimestamp: ((_ timestampNanoseconds: UInt64) -> Void)?
     public var onFrameSent: ((AlvrVideoSendReport) -> Void)?
@@ -352,6 +354,8 @@ public final class AlvrVideoStreamSender: @unchecked Sendable {
     private var trackingArrivals = TrackingArrivalHistory()
     private var trackingReadyCallback: (() -> Void)?
     private var tcpReceiveBuffer = Data()
+    /// Only touched on `queue`.
+    private var trackingReassembler = AlvrTrackingReassembler()
     private var transportFailed = false
     /// Only touched on `queue`, which also runs every write and read.
     private var socketClosed = false
@@ -690,10 +694,24 @@ public final class AlvrVideoStreamSender: @unchecked Sendable {
     }
 
     private func handleUplink(_ data: Data) {
+        // Tracking (stream 0) packets with hand skeletons span shards; join
+        // them for the full sample. Shard 0 alone still feeds the head pose
+        // below without waiting.
+        let bytes = [UInt8](data)
+        var sample: AlvrTrackingSample?
+        if bytes.count >= 18, bytes[4] == 0, bytes[5] == 0,
+           Int((0..<4).reduce(UInt32(0)) { ($0 << 8) | UInt32(bytes[$1]) }) + 4 == bytes.count,
+           let body = trackingReassembler.add(bytes) {
+            sample = try? AlvrTrackingDecoder.decode(body)
+        }
+        handleUplinkHeader(data)
+        if let sample { onTrackingSample?(sample) }
+    }
+
+    private func handleUplinkHeader(_ data: Data) {
         guard let packet = try? AlvrUplinkPacketDecoder.decode(data) else { return }
         switch packet {
-        case .tracking(let timestamp, let headPose, let leftController,
-                       let rightController, let controllerMask):
+        case .tracking(let timestamp, let headPose, _, _, _):
             stateLock.lock()
             let isFirstTrackingPacket = latestTrackingTimestamp == nil
             latestTrackingTimestamp = timestamp
@@ -706,9 +724,6 @@ public final class AlvrVideoStreamSender: @unchecked Sendable {
             if isFirstTrackingPacket { callback?() }
             onTrackingTimestamp?(timestamp)
             if let headPose { onHeadPose?(timestamp, headPose) }
-            if let leftController { onControllerMotion?(timestamp, .left, leftController) }
-            if let rightController { onControllerMotion?(timestamp, .right, rightController) }
-            onControllerMask?(timestamp, controllerMask)
         case .statistics(let statistics):
             onStatistics?(statistics)
         case .other:

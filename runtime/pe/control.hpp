@@ -33,6 +33,12 @@ bool controlActive(XrSession session);
 // advertise the stream's actual target size to the application.
 bool controlConfiguredViewSize(uint32_t* width, uint32_t* height);
 
+// True when the BASALT_CONTROL handoff file is readable and its feature list
+// names BASALT_CONTROL_FEATURE_HAND_TRACKING (the streamer forwards Quest hand
+// skeletons). Read at xrEnumerateInstanceExtensionProperties time, before any
+// session exists, so it does not depend on the DXMT gate or a connection.
+bool controlHandTrackingAdvertised();
+
 // Blocks frame production while two submitted frames are still unconsumed by
 // the daemon (an app that calls xrWaitFrame(N+1) before xrEndFrame(N) can
 // have one more in flight). This is the end-to-end backpressure boundary: it
@@ -109,6 +115,27 @@ bool controlInputSnapshot(
     XrSession session,
     ControlInputSnapshot* snapshot,
     XrTime locateTime = 0);
+
+constexpr uint32_t kControlHandJointCount = 26;  // XR_HAND_JOINT_COUNT_EXT
+
+struct ControlHandSkeleton {
+    bool active;
+    uint64_t questTimestampNanoseconds;
+    // XR_EXT_hand_tracking joint order, expressed in LOCAL.
+    XrPosef jointPosesInLocal[kControlHandJointCount];
+    float jointRadii[kControlHandJointCount];
+};
+
+// Returns the latest fresh HAND_SKELETON for hand (0 left, 1 right),
+// converted to LOCAL with the definition in effect at locateTime (so a
+// recenter moves hands exactly like controllers). True only while connected
+// for that session, the hand is tracked, and the sample is as fresh as a
+// controller pose must be; otherwise out->active is false.
+bool controlHandSkeleton(
+    XrSession session,
+    uint32_t hand,
+    XrTime locateTime,
+    ControlHandSkeleton* out);
 
 // Sends one resolved OpenXR haptic command to the streamer. A zero duration
 // and amplitude is the stop representation.
