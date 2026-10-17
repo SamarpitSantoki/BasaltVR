@@ -810,7 +810,17 @@ struct BasaltStreamerApp {
             runtimeLink?.publishControllerMask(
                 timestampNanoseconds: timestamp, activeMask: activeMask)
         }
+        let logsHaptics = AlvrHapticsLog.isEnabled()
+        if logsHaptics, runtimeLink != nil {
+            fputs("BASALT_HAPTIC_LOG: logging every runtime haptic sent to ALVR\n", stderr)
+        }
         runtimeLink?.onHaptic { [weak videoSender] hand, duration, frequency, amplitude in
+            if logsHaptics {
+                fputs(AlvrHapticsLog.line(
+                    hand: hand, durationNanoseconds: duration,
+                    frequency: frequency, amplitude: amplitude,
+                    uptimeNanoseconds: DispatchTime.now().uptimeNanoseconds) + "\n", stderr)
+            }
             videoSender?.sendHaptics(
                 hand: hand, durationNanoseconds: duration,
                 frequency: frequency, amplitude: amplitude)

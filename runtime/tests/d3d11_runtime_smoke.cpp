@@ -9,10 +9,12 @@
 #include <cerrno>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iterator>
+#include <limits>
 #include <set>
 #include <vector>
 
@@ -1572,6 +1574,36 @@ int main(int argc, char** argv) {
             return fail("xrEnumerateBoundSourcesForAction values", result);
         }
     }
+    // OpenComposite's activeOriginFromSubaction prefix-matches these sources
+    // against "/user/hand/left"; pose and haptic actions must report the
+    // left-hand source like the button action does.
+    const struct {
+        XrAction action;
+        XrPath expected;
+        const char* label;
+    } leftHandSources[] = {
+        {poseAction, gripPosePath, "pose"},
+        {vibrateAction, hapticPath, "haptic"},
+    };
+    for (const auto& expectedSource : leftHandSources) {
+        boundSourcesInfo.action = expectedSource.action;
+        XrPath source = XR_NULL_PATH;
+        boundSourceCount = UINT32_MAX;
+        result = xrEnumerateBoundSourcesForAction(
+            session, &boundSourcesInfo, 1, &boundSourceCount, &source);
+        if (XR_FAILED(result) ||
+            boundSourceCount != (requireController ? 1u : 0u) ||
+            (requireController && source != expectedSource.expected)) {
+            std::fprintf(stderr, "FAIL: left-hand %s bound source (count %u)\n",
+                         expectedSource.label, boundSourceCount);
+            xrDestroySession(session);
+            release(context);
+            release(device);
+            xrDestroyInstance(instance);
+            return fail("xrEnumerateBoundSourcesForAction left hand", result);
+        }
+    }
+    boundSourcesInfo.action = grabAction;
 
     XrInputSourceLocalizedNameGetInfo localizedNameInfo{};
     localizedNameInfo.type = XR_TYPE_INPUT_SOURCE_LOCALIZED_NAME_GET_INFO;
@@ -1671,6 +1703,85 @@ int main(int argc, char** argv) {
         xrDestroyInstance(instance);
         return fail("haptic feedback", result);
     }
+
+    // OpenComposite's TriggerHapticVibrationAction forwards OpenVR values
+    // unchanged and aborts the game on any failure (The Lab level select).
+    // Each value is spec-valid or normalized, never XR_ERROR_VALIDATION_FAILURE.
+    // Connected, each reaches the daemon once on the left hand (11 calls),
+    // which checks the normalized sequence: zero amplitude is a stop, never a
+    // pulse; durations <= 0 with amplitude play the 5 ms minimum.
+    struct OpenCompositeHaptic {
+        const char* label;
+        XrPath subactionPath;
+        XrDuration duration;
+        float frequency;
+        float amplitude;
+    };
+    const float infinity = std::numeric_limits<float>::infinity();
+    const float notANumber = std::numeric_limits<float>::quiet_NaN();
+    const OpenCompositeHaptic openCompositeHaptics[] = {
+        // Hand.TriggerHapticPulse(0): seconds 0, frequency 1 / 0.
+        {"zero duration, infinite frequency", leftHandPath, 0, infinity, 1.0f},
+        // (int)(3.0f * 1e9f) overflows to INT_MIN on x86.
+        {"overflowed duration", leftHandPath, INT32_MIN, 320.0f, 1.0f},
+        {"amplitude above one", leftHandPath, 50'000'000, -1.0f, 1.5f},
+        {"non-finite amplitude", leftHandPath, 10'000'000, notANumber, notANumber},
+        // No ulRestrictToDevice: XR_NULL_PATH, frequency unspecified.
+        {"null subaction path", XR_NULL_PATH, XR_MIN_HAPTIC_DURATION,
+         XR_FREQUENCY_UNSPECIFIED, 0.5f},
+        // Silence must not become a pulse, whatever the duration.
+        {"zero amplitude, zero duration", leftHandPath, 0, infinity, 0.0f},
+        {"zero amplitude, 20 ms", leftHandPath, 20'000'000, 160.0f, 0.0f},
+        {"negative amplitude", leftHandPath, 20'000'000, 160.0f, -0.5f},
+        // The Lab's teleport hint: Hand.TriggerHapticPulse(500) every 50 ms,
+        // i.e. 0.0005 s at 1 / 0.0005 Hz, full amplitude.
+        {"500 us hint pulse", leftHandPath, 500'000, 2000.0f, 1.0f},
+        // IVRSystem::TriggerHapticPulse(us): us * 1000 ns, amplitude 1.
+        {"legacy 3999 us pulse", leftHandPath, 3'999'000,
+         XR_FREQUENCY_UNSPECIFIED, 1.0f},
+        {"legacy 0 us pulse", leftHandPath, 0, XR_FREQUENCY_UNSPECIFIED, 1.0f},
+    };
+    for (const OpenCompositeHaptic& haptic : openCompositeHaptics) {
+        XrHapticActionInfo ocInfo{};
+        ocInfo.type = XR_TYPE_HAPTIC_ACTION_INFO;
+        ocInfo.action = vibrateAction;
+        ocInfo.subactionPath = haptic.subactionPath;
+        XrHapticVibration ocVibration{};
+        ocVibration.type = XR_TYPE_HAPTIC_VIBRATION;
+        ocVibration.duration = haptic.duration;
+        ocVibration.frequency = haptic.frequency;
+        ocVibration.amplitude = haptic.amplitude;
+        result = xrApplyHapticFeedback(
+            session, &ocInfo, reinterpret_cast<const XrHapticBaseHeader*>(&ocVibration));
+        if (result != expectedHapticResult) {
+            std::fprintf(stderr, "FAIL: OpenComposite haptic (%s)\n", haptic.label);
+            xrDestroySession(session);
+            release(context);
+            release(device);
+            xrDestroyInstance(instance);
+            return fail("OpenComposite haptic values", result);
+        }
+    }
+    {
+        // Structurally invalid input still fails validation.
+        XrHapticVibration wrongType{};
+        wrongType.type = XR_TYPE_HAPTIC_ACTION_INFO;
+        wrongType.duration = XR_MIN_HAPTIC_DURATION;
+        wrongType.amplitude = 0.5f;
+        result = xrApplyHapticFeedback(
+            session, &hapticInfo, reinterpret_cast<const XrHapticBaseHeader*>(&wrongType));
+        if (result != XR_ERROR_VALIDATION_FAILURE) {
+            xrDestroySession(session);
+            release(context);
+            release(device);
+            xrDestroyInstance(instance);
+            return fail("haptic wrong struct type", result);
+        }
+    }
+    std::printf("PASS: OpenComposite haptic values (zero/overflowed duration, "
+                "infinite/negative frequency, zero/out-of-range/NaN amplitude, "
+                "null subaction, 500 us and legacy microsecond pulses) return %s\n",
+                expectedHapticResult == XR_SUCCESS ? "XR_SUCCESS" : "XR_SESSION_NOT_FOCUSED");
 
     if (injectedController) {
         // The native daemon answers the first haptic with a sparse squeeze

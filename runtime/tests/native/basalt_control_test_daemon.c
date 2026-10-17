@@ -77,6 +77,14 @@ static uint64_t g_last_frame_number = 0;
 static bool g_verify_clears = false;
 static bool g_compositor_scenarios = false;
 static uint64_t g_haptics_received = 0;
+#define MAX_RECORDED_HAPTICS 64u
+typedef struct {
+    uint32_t hand;
+    uint64_t duration_ns;
+    float frequency;
+    float amplitude;
+} RecordedHaptic;
+static RecordedHaptic g_haptics[MAX_RECORDED_HAPTICS];
 static bool g_refresh_tracking = false;
 static bool g_head_turned = false;
 static unsigned int g_frame_delay_ms = 0;
@@ -225,9 +233,23 @@ static bool handle_haptic(int fd, const uint8_t* payload, size_t length) {
         fprintf(stderr, "FAIL: invalid Haptic values\n");
         return false;
     }
+    // Silence is only ever a stop. A zero-amplitude "pulse" or a zero-length
+    // pulse with amplitude would be a runtime normalization bug.
+    const bool stop = duration == 0 && frequency == 0.0f && amplitude == 0.0f;
+    if (!stop && (duration == 0 || amplitude == 0.0f)) {
+        fprintf(stderr,
+                "FAIL: haptic is neither a stop nor a pulse (duration %" PRIu64
+                " frequency %g amplitude %g)\n",
+                duration, frequency, amplitude);
+        return false;
+    }
+    if (g_haptics_received < MAX_RECORDED_HAPTICS) {
+        g_haptics[g_haptics_received] =
+            (RecordedHaptic){read_u32(payload), duration, frequency, amplitude};
+    }
     ++g_haptics_received;
-    printf("daemon: haptic hand %u duration %" PRIu64 " amplitude %.2f\n",
-           read_u32(payload), duration, amplitude);
+    printf("daemon: haptic hand %u duration %" PRIu64 " frequency %g amplitude %.2f\n",
+           read_u32(payload), duration, frequency, amplitude);
     // Two deliberately unusual amplitudes are test-only synchronization
     // markers. They let the PE smoke deterministically prove that a newer
     // authoritative presence mask clears an already-published pose and that
@@ -273,6 +295,50 @@ static bool handle_haptic(int fd, const uint8_t* payload, size_t length) {
     // xrSyncActions must observe this as a change, without disturbing other
     // retained inputs.
     return duration == 0 || send_left_squeeze(fd, 0.25f);
+}
+
+/* The PE smoke replays OpenComposite-shaped xrApplyHapticFeedback values in
+ * this order (d3d11_runtime_smoke.cpp, "OpenComposite haptic values"); each
+ * reaches the daemon exactly once, on the left hand, as normalized below.
+ * 5 ms is the runtime minimum pulse, frequency 0 is unspecified. */
+static bool verify_open_composite_haptics(void) {
+    static const RecordedHaptic expected[] = {
+        {0, 5000000u, 0.0f, 1.0f},     /* zero duration, +inf frequency */
+        {0, 5000000u, 320.0f, 1.0f},   /* INT_MIN overflowed duration */
+        {0, 50000000u, 0.0f, 1.0f},    /* amplitude 1.5, frequency -1 */
+        {0, 0u, 0.0f, 0.0f},           /* NaN amplitude: stop */
+        {0, 5000000u, 0.0f, 0.5f},     /* XR_MIN_HAPTIC_DURATION, null path */
+        {0, 0u, 0.0f, 0.0f},           /* zero amplitude, zero duration: stop */
+        {0, 0u, 0.0f, 0.0f},           /* zero amplitude, 20 ms: stop */
+        {0, 0u, 0.0f, 0.0f},           /* negative amplitude: stop */
+        {0, 500000u, 2000.0f, 1.0f},   /* The Lab teleport hint, 500 us */
+        {0, 3999000u, 0.0f, 1.0f},     /* legacy TriggerHapticPulse(3999) */
+        {0, 5000000u, 0.0f, 1.0f},     /* legacy TriggerHapticPulse(0) */
+    };
+    const size_t count = sizeof(expected) / sizeof(expected[0]);
+    const size_t recorded = g_haptics_received < MAX_RECORDED_HAPTICS
+        ? (size_t)g_haptics_received : MAX_RECORDED_HAPTICS;
+    for (size_t start = 0; start + count <= recorded; ++start) {
+        size_t matched = 0;
+        while (matched < count) {
+            const RecordedHaptic* got = &g_haptics[start + matched];
+            const RecordedHaptic* want = &expected[matched];
+            if (got->hand != want->hand || got->duration_ns != want->duration_ns ||
+                __builtin_fabsf(got->frequency - want->frequency) > 0.001f ||
+                __builtin_fabsf(got->amplitude - want->amplitude) > 0.0001f) {
+                break;
+            }
+            ++matched;
+        }
+        if (matched == count) {
+            printf("PASS: OpenComposite haptics normalized (zero amplitude -> stop, "
+                   "zero/negative duration -> 5 ms, 500 us and legacy microsecond "
+                   "pulses verbatim)\n");
+            return true;
+        }
+    }
+    fprintf(stderr, "FAIL: OpenComposite haptic sequence was not delivered as normalized\n");
+    return false;
 }
 
 static Swapchain* find_swapchain(uint64_t id) {
@@ -963,10 +1029,15 @@ int main(int argc, char** argv) {
                g_frames_received, got_teardown ? " (clean teardown)" : "");
         return 0;
     }
-    if (g_haptics_received != 6) {
+    // 6 smoke haptics plus 11 OpenComposite-shaped values the runtime must
+    // normalize and deliver rather than reject.
+    if (g_haptics_received != 17) {
         fprintf(stderr,
-                "FAIL: received %" PRIu64 " haptic commands, expected exactly 6\n",
+                "FAIL: received %" PRIu64 " haptic commands, expected exactly 17\n",
                 g_haptics_received);
+        return 1;
+    }
+    if (!verify_open_composite_haptics()) {
         return 1;
     }
     printf("PASS: control daemon validated hello, swapchains, %" PRIu64
