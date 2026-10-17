@@ -3,23 +3,51 @@
 # Install the official ALVR v20.14.1 client on the connected Quest (USB, or adb over Wi-Fi).
 #
 #   scripts/install-quest-client.zsh
+#   scripts/install-quest-client.zsh --download   download the APK first if it is missing
+#   scripts/install-quest-client.zsh --yes        replace another ALVR version without asking
 #
 # The APK was downloaded from https://github.com/alvr-org/ALVR/releases/tag/v20.14.1
 # (asset alvr_client_android.apk) and its SHA-256 matches the digest GitHub shows for
-# that asset. This script checks the SHA-256 again before it installs.
-# If a different ALVR version is on the Quest, it asks (y/N) before it removes it.
+# that asset. This script checks the SHA-256 again before it installs, also after
+# --download, so only that exact file is ever installed.
+# If a different ALVR version is on the Quest, it asks (y/N) before it removes it,
+# unless --yes is given (the BasaltVR app asks you first).
 #
 # Environment (optional): ALVR_APK=/path/to/alvr_client_android.apk
 
 set -uo pipefail
 
 readonly apk=${ALVR_APK:-$HOME/Downloads/alvr-v20.14.1/alvr_client_android.apk}
+readonly apk_url=https://github.com/alvr-org/ALVR/releases/download/v20.14.1/alvr_client_android.apk
 readonly expected_sha=be68feeb02665e3d69f1cdbcabf38ea4d15c42868a7ec6b5e698dbefee4e4e36
 readonly expected_package=alvr.client.stable
 readonly expected_version=20.14.1
 
+download=0
+downloaded=0
+assume_yes=0
+for arg in "$@"; do
+    case $arg in
+        --download) download=1 ;;
+        --yes) assume_yes=1 ;;
+        -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) print -u2 "Unknown option: $arg"; exit 2 ;;
+    esac
+done
+
 sha_of() { shasum -a 256 "$1" | awk '{print $1}'; }
 
+if [[ ! -f $apk ]] && (( download )); then
+    print "Downloading ALVR $expected_version from GitHub..."
+    mkdir -p "${apk:h}" || exit 1
+    if ! curl -fL --retry 2 -o "$apk.part" "$apk_url"; then
+        rm -f "$apk.part"
+        print -u2 "The download failed. Check the internet connection and try again."
+        exit 1
+    fi
+    mv -f "$apk.part" "$apk" || exit 1
+    downloaded=1
+fi
 if [[ ! -f $apk ]]; then
     print -u2 "I cannot find the ALVR APK: $apk"
     print -u2 "Download it from https://github.com/alvr-org/ALVR/releases/tag/v20.14.1 (alvr_client_android.apk)."
@@ -36,6 +64,8 @@ if [[ $actual_sha != $expected_sha ]]; then
     print -u2 "The APK is not the file I expect. I will not install it."
     print -u2 "  expected: $expected_sha"
     print -u2 "  found:    $actual_sha"
+    # A file this script downloaded is removed, so the next try downloads it again.
+    (( downloaded )) && rm -f "$apk"
     exit 1
 fi
 print "APK checked: SHA-256 matches."
@@ -77,9 +107,13 @@ done
 if (( ${#mismatch} > 0 )); then
     print "Another ALVR is on the Quest:"
     for entry in $mismatch; do print "  $entry"; done
-    print -n "Remove it and install ALVR $expected_version? [y/N] "
     answer=""
-    read -r answer || answer=""
+    if (( assume_yes )); then
+        answer=y
+    else
+        print -n "Remove it and install ALVR $expected_version? [y/N] "
+        read -r answer || answer=""
+    fi
     if [[ $answer != [yY] && $answer != [yY][eE][sS] ]]; then
         print "No change made."
         exit 1

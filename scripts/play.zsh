@@ -20,6 +20,8 @@
 # by itself. See "Quest over Wi-Fi" in docs/STREAMER.md. Defaults: --quality high
 # --codec hevc on USB, --quality normal --codec h264 on Wi-Fi (see --quality).
 # To use adb without the cable: scripts/quest-wireless.zsh.
+# When adb sees no Quest and Wi-Fi is allowed, play.zsh runs `adb connect` to the IP
+# that quest-wireless.zsh saved, so it can restart ALVR for you over Wi-Fi too.
 #
 # The ALVR app on the Quest (alvr.client.stable only) is restarted once at the start,
 # because a Basalt session that ended badly can leave it in a state where the USB
@@ -42,8 +44,24 @@
 # Hidden test flag: --no-adb-check skips the Quest check and runs the streamer
 # without --wired/--wireless and without audio (no headset), so everything else
 # can be tested.
+#
+# For the BasaltVR app (environment, optional):
+#   BASALT_PLAY_EVENTS=1        also print one machine-readable line per step,
+#                               "@@basalt <event> [details]" (see play_event below)
+#   BASALT_PLAY_PARENT_PID=PID  stop everything cleanly when that process (the app) is gone
 
 set -uo pipefail
+
+# One machine-readable line per step for the BasaltVR app (only with BASALT_PLAY_EVENTS=1).
+# Events: start PROFILE, looking, wifi-reconnect IP, connection usb|wifi, quality TEXT,
+# log streamer|game|quest PATH, alvr-restart, streamer-start, open-alvr, steam-start,
+# headset-wait, headset-ready, game-start PROFILE, game-child PATH, game-ended STATUS,
+# stopping, stopped, fail CODE. The human lines are printed as before.
+# BasaltManagerKit/PlaySession.swift (PlayEvent) reads these; keep both in step.
+play_event() {
+    [[ ${BASALT_PLAY_EVENTS:-0} == 1 ]] || return 0
+    print -r -- "@@basalt $*"
+}
 
 readonly script_dir=${0:A:h}
 readonly repo=${script_dir:h}
@@ -80,7 +98,7 @@ while (( $# )); do
         --log-quest) log_quest=1 ;;
         --no-log-quest) log_quest=0 ;;
         --no-adb-check) no_adb_check=1 ;;
-        -h|--help) sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,51p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) print -u2 "Unknown option: $arg"; exit 2 ;;
         *)
             if [[ -n $profile ]]; then print -u2 "usage: scripts/play.zsh [--wifi|--usb] [--quality normal|high|max] [--codec h264|hevc] [--no-log-quest] <profile>"; exit 2; fi
@@ -108,9 +126,11 @@ fi
 mkdir -p "$log_dir"
 cd "$repo" || exit 1
 export BASALT_REPO_ROOT=$repo
+play_event start "$profile"
 
 # 1. Binaries: build once, then run them directly.
 readonly bin_dir=${BASALT_BIN_DIR:-$repo/streamer/.build/release}
+export BASALT_BIN_DIR=$bin_dir   # steam.zsh uses the same basaltctl
 readonly streamer=$bin_dir/basalt-streamer
 readonly ctl=$bin_dir/basaltctl
 if [[ ! -x $streamer || ! -x $ctl ]]; then
@@ -118,6 +138,7 @@ if [[ ! -x $streamer || ! -x $ctl ]]; then
     if ! swift build -c release --package-path streamer >"$build_log" 2>&1 \
         || [[ ! -x $streamer || ! -x $ctl ]]; then
         print -u2 "The build failed. See: $build_log"
+        play_event fail build
         exit 1
     fi
 fi
@@ -127,6 +148,7 @@ source "$script_dir/game-processes.zsh"
 profile_json=$("$ctl" profile show "$profile" 2>&1) || {
     print -u2 "I do not know the profile '$profile'. Your profiles:"
     "$ctl" profile list 2>&1 | cut -f1 | sed 's/^/  /' >&2
+    play_event fail profile
     exit 1
 }
 bottle_name=$(print -r -- "$profile_json" | jq -r '.bottleName')
@@ -155,6 +177,7 @@ if (( ! no_adb_check )); then
     have_adb=0
     quest_find_adb 2>/dev/null && have_adb=1
     pick=1
+    play_event looking
     if (( have_adb )); then
         # --wifi does not need adb, so look once. Otherwise look again for ~5 s while
         # the listing may be transient (adb server restarting, Quest just plugged in).
@@ -162,6 +185,16 @@ if (( ! no_adb_check )); then
         else
             print "Looking for the Quest on the USB cable..."
             quest_pick_serial_retry; pick=$?
+        fi
+        # No usable Quest in adb, and Wi-Fi is allowed: reconnect adb over Wi-Fi to the
+        # Quest IP that scripts/quest-wireless.zsh saved, so the ALVR app can be
+        # restarted for you. Wi-Fi streaming itself works without this.
+        if (( pick != 0 )) && [[ $transport != usb ]] && saved_ip=$(quest_saved_ip); then
+            print "Trying adb over Wi-Fi at the saved Quest address $saved_ip..."
+            play_event wifi-reconnect "$saved_ip"
+            if quest_connect_ip "$saved_ip" 2>/dev/null; then
+                quest_pick_serial; pick=$?
+            fi
         fi
     fi
 
@@ -175,14 +208,17 @@ if (( ! no_adb_check )); then
     if [[ $mode == usb ]]; then
         if (( ! have_adb )); then
             print -u2 "I cannot find adb. Run: brew install android-platform-tools"
+            play_event fail no-adb
             exit 1
         fi
         if (( pick == 2 )); then
             print -u2 "The Quest asks for permission. Put it on and tap Allow for USB debugging. Then run this command again."
+            play_event fail quest-unauthorized
             exit 1
         fi
         if (( pick != 0 )) || [[ $QUEST_LINK != usb ]]; then
             print -u2 "I cannot see the Quest on the USB cable. Plug it in and run this command again. Or play without the cable: scripts/play.zsh --wifi $profile"
+            play_event fail no-usb-quest
             exit 1
         fi
     fi
@@ -193,10 +229,12 @@ if (( ! no_adb_check )); then
             | sed -n 's/^package://p' | grep -E '^alvr\.client(\.stable|\.dev)?$' | head -n 1)
         if [[ -z $alvr_package ]]; then
             print -u2 "ALVR is not on the Quest. Run: scripts/install-quest-client.zsh"
+            play_event fail alvr-missing
             exit 1
         fi
     fi
     print "Connection: $mode${QUEST_SERIAL:+ (adb $QUEST_SERIAL)}"
+    play_event connection "$mode"
     if (( have_adb )); then
         print "Quest choice: $QUEST_REASON"
         if [[ $transport == auto && $mode == wifi ]]; then
@@ -213,6 +251,7 @@ fi
 
 if pgrep -x basalt-streamer >/dev/null 2>&1; then
     print -u2 "Another streamer is already running. Stop it first: pkill -INT basalt-streamer"
+    play_event fail streamer-running
     exit 1
 fi
 
@@ -233,6 +272,7 @@ game_pid=""
 logcat_pid=""        # pid of the watcher subshell
 logcat_adb_pid=""    # pid of the real adb logcat process
 logcat_pidfile=""
+parent_watch_pid=""  # pid of the subshell that watches BASALT_PLAY_PARENT_PID
 cleanup_done=0
 
 # Quest log. A small watcher subshell runs adb logcat (a plain background command, so its
@@ -326,11 +366,32 @@ stop_streamer() {
     streamer_pid=""
 }
 
+# The BasaltVR app runs this script as its child. If the app is gone (quit, crash,
+# force quit), stop the session the same way Ctrl-C does.
+watch_parent() {
+    local parent=${BASALT_PLAY_PARENT_PID:-}
+    [[ $parent == <-> ]] || return 0
+    local main=$$
+    (
+        trap - EXIT INT TERM HUP
+        while kill -0 $parent 2>/dev/null; do sleep ${BASALT_PARENT_POLL:-1}; done
+        print -u2 "The BasaltVR app is gone. Stopping the session."
+        kill -TERM $main 2>/dev/null
+        exit 0
+    ) &
+    parent_watch_pid=$!
+}
+
 cleanup() {
     (( cleanup_done )) && return 0
     cleanup_done=1
     trap '' INT TERM HUP
     print "Shutting down..."
+    play_event stopping
+    if [[ -n $parent_watch_pid ]]; then
+        kill -TERM $parent_watch_pid 2>/dev/null
+        parent_watch_pid=""
+    fi
     if [[ -n $game_pid ]] && kill -0 $game_pid 2>/dev/null; then
         kill -TERM $game_pid 2>/dev/null
     fi
@@ -343,6 +404,7 @@ cleanup() {
     fi
     rm -f "$control"
     print "Done. Logs: $log_dir"
+    play_event stopped
 }
 
 on_signal() {
@@ -351,12 +413,16 @@ on_signal() {
 }
 trap on_signal INT TERM HUP
 trap cleanup EXIT
+watch_parent
 kill_stale_logcats
+play_event log streamer "$streamer_log"
+play_event log game "$game_log"
 
 # Quest log: the Quest keeps only ~30 s of log, so save it for the whole session.
 if (( log_quest )) && [[ -n $QUEST_SERIAL && -n $alvr_package ]]; then
     start_logcat
     print "Saving the Quest log to $quest_log (stops at $quest_log_max_mb MB)."
+    play_event log quest "$quest_log"
 fi
 
 # 5. Close any Steam that is already running in this bottle. A game started from a running
@@ -396,6 +462,7 @@ elif [[ $mode == wifi ]]; then
 fi
 if [[ -n $quality_text ]]; then
     print "Quality $quality: $quality_text, $codec."
+    play_event quality "$quality: $quality_text, $codec"
     if [[ $quality == max && $codec == hevc ]]; then
         print "Warning: HEVC cannot hold 72 fps at --quality max (1680x1760, 23.5 ms encode). Use --quality high or --codec h264."
     elif [[ $quality == max ]]; then
@@ -407,6 +474,7 @@ streamer_args+=("${audio_args[@]}")
 alvr_retried=0
 if [[ $alvr_package == alvr.client.stable ]]; then
     print "Restarting the ALVR app on the Quest for a clean start."
+    play_event alvr-restart
     quest_restart_alvr
 fi
 
@@ -426,6 +494,7 @@ retry_after_handshake_failure() {
     grep -qE 'ALVR USB handshake attempt|ALVR initial client-status stage failed' "$streamer_log" 2>/dev/null || return 1
     alvr_retried=1
     print "The ALVR handshake failed. Restarting the ALVR app and trying once more."
+    play_event alvr-restart
     print "--- ALVR handshake failed; restarted the ALVR app; second try ---" >>"$streamer_log"
     quest_restart_alvr
     start_streamer
@@ -433,6 +502,7 @@ retry_after_handshake_failure() {
 }
 
 print "Starting the streamer. Put the headset on."
+play_event streamer-start
 start_streamer
 
 if [[ $mode == wifi ]]; then
@@ -442,11 +512,13 @@ if [[ $mode == wifi ]]; then
         qadb shell monkey -p "$alvr_package" 1 >/dev/null 2>&1
     fi
     print "Wi-Fi: ALVR connects by itself, so tap nothing in ALVR. Open ALVR on the Quest if it is not open. If your Mac asks to allow incoming connections or Local Network access, click Allow."
+    play_event open-alvr
 fi
 
 # Beat Saber needs Steam running before it starts. Start Steam while the streamer connects.
 if [[ $needs_steam_first == true ]]; then
     print "Starting Steam."
+    play_event steam-start
     "$script_dir/steam.zsh" start >/dev/null
     if [[ ! -f $HOME/Library/Application\ Support/BasaltVR/Bottles/$bottle_name/prefix/drive_c/Program\ Files\ \(x86\)/Steam/config/loginusers.vdf ]]; then
         print "Warning: Steam does not look signed in. If the game fails, run scripts/steam.zsh, sign in, then scripts/steam.zsh stop."
@@ -454,6 +526,7 @@ if [[ $needs_steam_first == true ]]; then
 fi
 
 # Wait for the control file. With a headset this includes the USB handshake.
+play_event headset-wait
 i=0
 while (( i < 360 )); do
     [[ -s $control ]] && break
@@ -461,6 +534,7 @@ while (( i < 360 )); do
         if retry_after_handshake_failure; then i=0; continue; fi
         print -u2 "The streamer stopped. Last lines of $streamer_log:"
         tail -n 6 "$streamer_log" >&2
+        play_event fail streamer-stopped
         exit 1
     fi
     sleep 0.5
@@ -469,6 +543,7 @@ done
 if [[ ! -s $control ]]; then
     print -u2 "The streamer did not get ready in 3 minutes. Last lines of $streamer_log:"
     tail -n 6 "$streamer_log" >&2
+    play_event fail streamer-timeout
     exit 1
 fi
 
@@ -482,6 +557,7 @@ if [[ $mode == wifi ]]; then
             if retry_after_handshake_failure; then i=0; continue; fi
             print -u2 "The streamer stopped. Last lines of $streamer_log:"
             tail -n 6 "$streamer_log" >&2
+            play_event fail streamer-stopped
             exit 1
         fi
         sleep 0.5
@@ -490,9 +566,11 @@ if [[ $mode == wifi ]]; then
     if ! grep -q 'ALVR control accepted' "$streamer_log" 2>/dev/null; then
         print -u2 "The Quest did not connect in 3 minutes. Open ALVR on the Quest, check that the Mac and the Quest use the same Wi-Fi, then run this command again. Last lines of $streamer_log:"
         tail -n 6 "$streamer_log" >&2
+        play_event fail wifi-timeout
         exit 1
     fi
 fi
+play_event headset-ready
 
 # Wait until Steam has its window up (webhelper renderer), then a short pause.
 if [[ $needs_steam_first == true ]]; then
@@ -505,15 +583,18 @@ fi
 
 # 7. Game.
 print "Starting $profile."
+play_event game-start "$profile"
 "$ctl" run "$profile" --control-file "$control" >"$game_log" 2>&1 </dev/null &
 game_pid=$!
 
 game_status=0
+streamer_lost=0
 while kill -0 $game_pid 2>/dev/null; do
     if ! kill -0 $streamer_pid 2>/dev/null; then
         print -u2 "The streamer stopped. Last lines of $streamer_log:"
         tail -n 6 "$streamer_log" >&2
         game_status=1
+        streamer_lost=1
         break
     fi
     sleep 1
@@ -533,6 +614,7 @@ if (( game_status == 0 )); then
             print -u2 "The streamer stopped. Last lines of $streamer_log:"
             tail -n 6 "$streamer_log" >&2
             game_status=1
+            streamer_lost=1
         elif (( GAME_CHILD_SEEN )); then
             game_status=0   # handing over to another program is not an error
         fi
@@ -541,7 +623,10 @@ fi
 if (( game_status != 0 )); then
     print -u2 "The game stopped with an error. Last lines of $game_log:"
     tail -n 6 "$game_log" >&2
+    if (( streamer_lost )); then play_event fail streamer-stopped
+    else play_event fail game-error; fi
 else
     print "The game ended."
+    play_event game-ended 0
 fi
 exit $game_status
