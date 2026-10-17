@@ -54,13 +54,26 @@ require_bottle() {
 
 # Prints the path of basaltctl, building it once if needed. Also makes sure the
 # Steam web helper shim exists (runtime/build/bin/steamwebhelper_compat.exe).
+# BASALT_BIN_DIR (set by play.zsh and the BasaltVR app) names the folder that holds
+# basaltctl. A packaged app has no sources, so nothing is built there.
 ensure_ctl() {
-    local ctl=$repo/streamer/.build/release/basaltctl
+    local ctl=${BASALT_BIN_DIR:-$repo/streamer/.build/release}/basaltctl
+    local can_build=0
+    [[ -f $repo/streamer/Package.swift && -f $repo/runtime/CMakeLists.txt ]] && can_build=1
     if [[ ! -x $ctl ]]; then
+        if (( ! can_build )); then
+            print -u2 "basaltctl is missing: $ctl"
+            return 1
+        fi
         print -u2 "Building basaltctl. This happens one time."
         swift build -c release --package-path "$repo/streamer" --product basaltctl >&2 || return 1
+        ctl=$repo/streamer/.build/release/basaltctl
     fi
     if [[ ! -f $repo/runtime/build/bin/steamwebhelper_compat.exe ]]; then
+        if (( ! can_build )); then
+            print -u2 "The Steam web helper shim is missing: $repo/runtime/build/bin/steamwebhelper_compat.exe"
+            return 1
+        fi
         print -u2 "Building the Steam web helper shim."
         (cd "$repo" && make runtime-build) >&2 || return 1
     fi

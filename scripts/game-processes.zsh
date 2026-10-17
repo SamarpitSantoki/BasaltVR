@@ -123,6 +123,7 @@ game_wait_for_children() {
     [[ -n $found ]] || return 0
     GAME_CHILD_SEEN=1
     print -r -- "$GAME_NAME started $found; still running."
+    (( $+functions[play_event] )) && play_event game-child "$found"
     while (( gone < gone_needed )); do
         if [[ -n $streamer_pid ]] && ! kill -0 $streamer_pid 2>/dev/null; then
             return 3

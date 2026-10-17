@@ -170,6 +170,32 @@ quest_pick_serial_retry() {
 # adb for the chosen Quest. Always passes -s.
 qadb() { "$QUEST_ADB" -s "$QUEST_SERIAL" "$@"; }
 
+# Prints the Quest IP that scripts/quest-wireless.zsh saved. Returns 1 when there is none.
+quest_saved_ip() {
+    local ip=""
+    [[ -r $QUEST_IP_FILE ]] && ip=$(<"$QUEST_IP_FILE")
+    [[ $ip == <->.<->.<->.<-> ]] || return 1
+    print -r -- "$ip"
+}
+
+# Connect adb over Wi-Fi to IP:PORT (default port BASALT_QUEST_PORT or 5555) and check
+# that adb reports state "device". It touches only that address.
+quest_connect_ip() {
+    local ip=$1 port=${2:-${BASALT_QUEST_PORT:-5555}} out state
+    # adb connect waits a long time for a dead address. Check the address first.
+    if ! ping -c 1 -t 3 "$ip" >/dev/null 2>&1; then
+        print -u2 "The Quest at $ip does not answer. Is it on and on the same Wi-Fi as this Mac?"
+        return 1
+    fi
+    out=$("$QUEST_ADB" connect "$ip:$port" 2>&1)
+    state=$("$QUEST_ADB" -s "$ip:$port" get-state 2>/dev/null)
+    if [[ $state == device ]]; then
+        return 0
+    fi
+    print -u2 "adb said: ${out:-nothing}"
+    return 1
+}
+
 # Restart the ALVR app on the chosen Quest: force-stop, wait, launch, wait for it to
 # come up. Touches only alvr.client.stable. Waits: BASALT_ALVR_STOP_WAIT (2 s) and
 # BASALT_ALVR_START_WAIT (6 s).

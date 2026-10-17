@@ -53,22 +53,8 @@ save_ip() {
     mkdir -p "${QUEST_IP_FILE:h}" && print -r -- "$1" >"$QUEST_IP_FILE"
 }
 
-# Connect to ip:port and check that adb reports state "device".
-connect_ip() {
-    local ip=$1 out state
-    # adb connect waits a long time for a dead address. Check the address first.
-    if ! ping -c 1 -t 3 "$ip" >/dev/null 2>&1; then
-        print -u2 "The Quest at $ip does not answer. Is it on and on the same Wi-Fi as this Mac?"
-        return 1
-    fi
-    out=$("$QUEST_ADB" connect "$ip:$port" 2>&1)
-    state=$("$QUEST_ADB" -s "$ip:$port" get-state 2>/dev/null)
-    if [[ $state == device ]]; then
-        return 0
-    fi
-    print -u2 "adb said: ${out:-nothing}"
-    return 1
-}
+# Connect to ip:port and check that adb reports state "device" (quest-adb.zsh).
+connect_ip() { quest_connect_ip "$1" "$port"; }
 
 print_status() {
     print "adb devices:"
