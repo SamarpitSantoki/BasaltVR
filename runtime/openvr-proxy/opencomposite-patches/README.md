@@ -3,6 +3,7 @@
 `runtime/scripts/build-opencomposite.zsh` applies these patches, in file-name order, to
 OpenComposite source cloned from <https://github.com/Charmillionaire/OpenComposite> at the pinned
 commit `339509b9caf534fa2ced71dc71331ec3c9c3a1a6`. The script fails if a patch does not apply.
+What each patch fixes is described in [the OpenComposite guide](../../../docs/OPENCOMPOSITE.md).
 
 | Patch | Summary |
 |---|---|
