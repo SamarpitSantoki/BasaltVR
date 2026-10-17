@@ -103,7 +103,8 @@ additionally needs `brew install cmake mingw-w64`.
 ```sh
 make doctor          # check the local toolchain
 make check           # the same quality gate CI runs
-make app             # build everything and run the management app
+make app             # build BasaltVR.app and install it to ~/Applications
+make run-app         # run the management app from source
 ```
 
 | Command | What it does |

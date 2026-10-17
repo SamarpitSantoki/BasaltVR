@@ -11,6 +11,21 @@ before each session). The streamer reports a mismatched DLL instead of connectin
 
 ### Added
 
+- **Play** page in the BasaltVR app (the new start page): game tiles from the launch profiles
+  with Steam library art, one Play button, Stop, Connection (Automatic / USB cable / Wi-Fi) and
+  Quality (Normal / High) pickers, a plain-language status, and live FPS, delay, and Mbps. It runs
+  `scripts/play.zsh` as its child, so the app and Terminal share one launch flow. A "Before you
+  play" card checks the Quest, ALVR 20.14.1, BlackHole, and Microphone permission, with one-click
+  fixes. See `docs/MANAGEMENT.md`.
+- `make app` builds `BasaltVR.app` (ad-hoc signed, hardened runtime, audio-input entitlement)
+  linked to the checkout and installs it to `~/Applications`; a linked git worktree is never
+  installed. `make run-app` runs the app from source, as `make app` did before. `make check`
+  also builds and verifies the bundle without installing it.
+- `scripts/play.zsh`: `BASALT_PLAY_EVENTS=1` prints one `@@basalt` line per step for the app,
+  `BASALT_PLAY_PARENT_PID` ends the session when the app is gone, and with no Quest in adb and
+  Wi-Fi allowed it first runs `adb connect` to the saved Quest IP. New `scripts/quest-check.zsh`
+  (read-only Quest and ALVR status) and `scripts/install-quest-client.zsh --download --yes`.
+
 - Control protocol v10: `HelloAck` carries the negotiated Quest refresh period, and `xrWaitFrame`
   paces to it instead of a fixed 72 Hz, so `--fps 90` or `--fps 120` with `--runtime` no longer
   renders 72 Hz frames for a faster display.
@@ -85,7 +100,7 @@ before each session). The streamer reports a mismatched DLL instead of connectin
   Wine cold start) only when the bottle's registry no longer names it.
 - `basalt-streamer --runtime` refuses a per-eye resolution above the runtime's 1680×1760 maximum
   instead of letting the game silently render at a different size than the stream.
-- `make app` runs the release build.
+- `make app` runs the release build (now `make run-app`; `make app` builds `BasaltVR.app`).
 - The stream configuration asks the ALVR client to predict controllers as far ahead as the head
   (`steamvr_pipeline_frames = 0`); with ALVR's default they lagged the head by 2–3 frames because
   Basalt does not extrapolate them as SteamVR does. `--controller-prediction alvr` restores it.
