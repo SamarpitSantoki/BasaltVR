@@ -51,6 +51,7 @@ case $1 in
             print "    inet ${FAKE_QUEST_IP:-127.0.0.1}/24 brd 127.0.0.255 scope global wlan0"
         fi
         if [[ $1 == pm ]]; then print "package:alvr.client.stable"; fi
+        if [[ $1 == dumpsys ]]; then print "    versionName=${FAKE_ALVR_VERSION:-20.14.1}"; fi
         ;;
     logcat)
         # A long-running log: remember the pid so the test can check it was stopped.
@@ -556,7 +557,117 @@ kill -INT $play_pid
 wait $play_pid; code=$?
 expect "Ctrl-C while the child runs: exit code 130" "130" "$code"
 expect "Ctrl-C while the child runs: shut down" "1" "$(count_in 'Shutting down' "$work/play.out")"
+
+# 7. The BasaltVR app gets one event line when The Lab hands over to Robot Repair.
+rm -f "$FAKE_PS_COUNT"
+BASALT_PLAY_EVENTS=1 FAKE_BOTTLE_UP=1 FAKE_CHILD_DELAY=0 FAKE_PS_LIVE_CALLS=12 run_play --no-adb-check the-lab
+expect "events: the-lab child event" "1" "$(count_in '^@@basalt game-child RobotRepair.bin.win64.vr.exe$' "$work/play.out")"
 unset BASALT_GAME_GRACE BASALT_GAME_POLL BASALT_STEAM_SETTLE
+
+# ---------------------------------------------------------------------------
+# The BasaltVR app runs play.zsh with BASALT_PLAY_EVENTS=1 and reads "@@basalt" lines.
+# ---------------------------------------------------------------------------
+export FAKE_STREAMER_FAIL_N=0 BASALT_STEAM_SETTLE=0
+events() { sed -n 's/^@@basalt //p' "$work/play.out" | sed 's/ \/.*//' | tr '\n' ',' ; }
+export FAKE_DEVICES="$usb_line"$'\n'"$tcp_line"
+run_play beat-saber-steam
+expect "events: none without BASALT_PLAY_EVENTS" "0" "$(count_in '^@@basalt' "$work/play.out")"
+BASALT_PLAY_EVENTS=1 run_play beat-saber-steam
+expect "events: USB session in order" \
+    "start beat-saber-steam,looking,connection usb,log streamer,log game,log quest,quality high: 1344x1408 per eye, 72 fps, 60 Mbps, hevc,alvr-restart,streamer-start,headset-wait,headset-ready,game-start beat-saber-steam,game-ended 0,stopping,stopped," \
+    "$(events)"
+BASALT_PLAY_EVENTS=1 run_play --wifi --quality high --codec hevc beat-saber-steam
+expect "events: Wi-Fi session names the connection and opens ALVR" "1" \
+    "$(events | grep -c 'connection wifi,.*streamer-start,open-alvr,headset-wait,headset-ready')"
+BASALT_PLAY_EVENTS=1 FAKE_DEVICES="" run_play --usb beat-saber-steam
+expect "events: no USB Quest fails with a code" "fail no-usb-quest" "$(sed -n 's/^@@basalt //p' "$work/play.out" | tail -n 1)"
+BASALT_PLAY_EVENTS=1 FAKE_DEVICES='QUEST3SERIAL01 unauthorized usb:1-1 transport_id:2' BASALT_PICK_TRIES=1 \
+    run_play --usb beat-saber-steam
+expect "events: unauthorized Quest fails with a code" "fail quest-unauthorized" "$(sed -n 's/^@@basalt //p' "$work/play.out" | tail -n 1)"
+BASALT_PLAY_EVENTS=1 FAKE_STREAMER_FAIL_N=2 run_play beat-saber-steam
+expect "events: streamer that never starts fails with a code" "1" "$(count_in '^@@basalt fail streamer-stopped$' "$work/play.out")"
+expect "events: the streamer failure still shuts down" "1" "$(count_in '^@@basalt stopped$' "$work/play.out")"
+
+# Saved Quest IP: with no Quest in adb and Wi-Fi allowed, play.zsh runs `adb connect` to it.
+print -r -- "127.0.0.1" >"$QUEST_IP_FILE"
+BASALT_PLAY_EVENTS=1 FAKE_DEVICES="" BASALT_PICK_TRIES=1 run_play --wifi beat-saber-steam
+expect "saved IP: Wi-Fi without adb Quest connects to the saved IP" "1" "$(count_in 'adb connect 127.0.0.1:5555' "$FAKE_LOG")"
+expect "saved IP: event names the address" "1" "$(count_in '^@@basalt wifi-reconnect 127.0.0.1$' "$work/play.out")"
+expect "saved IP: the session still runs over Wi-Fi" "1" "$(count_in '^@@basalt connection wifi$' "$work/play.out")"
+FAKE_DEVICES="" BASALT_PICK_TRIES=1 run_play beat-saber-steam
+expect "saved IP: auto without adb Quest also connects" "1" "$(count_in 'adb connect 127.0.0.1:5555' "$FAKE_LOG")"
+run_play beat-saber-steam
+expect "saved IP: a USB Quest needs no connect" "0" "$(count_in 'adb connect' "$FAKE_LOG")"
+FAKE_DEVICES="" BASALT_PICK_TRIES=1 run_play --usb beat-saber-steam
+expect "saved IP: --usb never connects over Wi-Fi" "0" "$(count_in 'adb connect' "$FAKE_LOG")"
+rm -f "$QUEST_IP_FILE"
+FAKE_DEVICES="" BASALT_PICK_TRIES=1 run_play --wifi beat-saber-steam
+expect "saved IP: no saved IP, no connect" "0" "$(count_in 'adb connect' "$FAKE_LOG")"
+
+# The app is gone (quit, crash): play.zsh stops everything like Ctrl-C.
+rm -rf "$work/home"; mkdir -p "$work/home"
+: >"$FAKE_LOG"; : >"$work/streamer.log"; rm -f "$FAKE_LOG.logcat_pid" "$work/control"
+sleep 60 &
+fake_app=$!
+HOME=$work/home BASALT_PLAY_CONTROL=$work/control BASALT_BIN_DIR=$work/fakebin \
+    BASALT_ALVR_STOP_WAIT=0 BASALT_ALVR_START_WAIT=0 FAKE_STREAMER_LOG=$work/streamer.log \
+    BASALT_PLAY_PARENT_PID=$fake_app BASALT_PARENT_POLL=0.2 BASALT_PLAY_EVENTS=1 \
+    "$work/scripts/play.zsh" beat-saber-steam >"$work/play.out" 2>&1 &
+play_pid=$!
+for i in {1..100}; do logcat_alive && grep -q 'game-start' "$work/play.out" && break; sleep 0.1; done
+kill -TERM $fake_app; wait $fake_app 2>/dev/null
+for i in {1..100}; do kill -0 $play_pid 2>/dev/null || break; sleep 0.1; done
+wait $play_pid; code=$?
+expect "app gone: play.zsh stops (exit 130)" "130" "$code"
+expect "app gone: says why" "1" "$(count_in 'The BasaltVR app is gone' "$work/play.out")"
+sleep 0.3
+expect "app gone: logcat process is gone" "1" "$(logcat_stopped)"
+expect "app gone: streamer is gone" "1" "$(/usr/bin/pgrep -f "$work/fakebin/basalt-streamer" >/dev/null; print $?)"
+unset FAKE_STREAMER_FAIL_N BASALT_STEAM_SETTLE
+
+# ---------------------------------------------------------------------------
+# scripts/quest-check.zsh: the app's read-only Quest status.
+# ---------------------------------------------------------------------------
+cp "$script_dir/quest-check.zsh" "$work/scripts/"
+check_value() { "$work/scripts/quest-check.zsh" | sed -n "s/^$1=//p" | tr '\n' '|'; }
+: >"$FAKE_LOG"
+export FAKE_DEVICES="$emu_line"$'\n'"$phone_line"$'\n'"$tcp_line"$'\n'"$usb_line"
+expect "quest-check: USB Quest" "ok|" "$(check_value status)"
+expect "quest-check: link and serial" "usb|QUEST3SERIAL01|" "$(check_value link)$(check_value serial)"
+expect "quest-check: ALVR version" "alvr.client.stable 20.14.1|" "$(check_value alvr)"
+expect "quest-check: other devices get no command" "1" "$(grep -qE 'emulator-|R5CT1234ABC' "$FAKE_LOG"; print $?)"
+expect "quest-check: only reads (devices, pm list, dumpsys)" "0" \
+    "$(grep -Ev '^adb (devices -l|-s QUEST3SERIAL01 shell (pm list packages|dumpsys package alvr\.client\.stable))$' "$FAKE_LOG" | wc -l | tr -d ' ')"
+expect "quest-check: older ALVR" "alvr.client.stable 20.6.0|" "$(FAKE_ALVR_VERSION=20.6.0 check_value alvr)"
+expect "quest-check: unauthorized" "unauthorized|" \
+    "$(FAKE_DEVICES='QUEST3SERIAL01 unauthorized usb:1-1 transport_id:2' check_value status)"
+expect "quest-check: nothing (and no ALVR line)" "none|" "$(FAKE_DEVICES="" check_value status)$(FAKE_DEVICES="" check_value alvr)"
+print -r -- "192.168.1.77" >"$QUEST_IP_FILE"
+expect "quest-check: saved IP" "192.168.1.77|" "$(check_value saved_ip)"
+rm -f "$QUEST_IP_FILE"
+# Only where quest_find_adb's fixed fallbacks hold no adb (it also looks in Homebrew).
+if [[ ! -x /opt/homebrew/bin/adb && ! -x /usr/local/bin/adb ]]; then
+    expect "quest-check: no adb" "no-adb|" "$(PATH=/usr/bin:/bin HOME=$work/home "$work/scripts/quest-check.zsh" 2>/dev/null | sed -n 's/^status=//p' | tr '\n' '|')"
+fi
+
+# scripts/install-quest-client.zsh: a downloaded file must still match the SHA-256.
+cat >"$work/bin/curl" <<'FAKE'
+#!/bin/zsh
+args=("$@")
+print -r -- "not the ALVR apk" >"${args[$args[(i)-o]+1]}"
+FAKE
+chmod +x "$work/bin/curl"
+apk_dir=$work/apk
+ALVR_APK=$apk_dir/alvr_client_android.apk "$script_dir/install-quest-client.zsh" >"$work/out.txt" 2>&1
+expect "install: missing APK without --download exits 1" "1" "$?"
+expect "install: names the download page" "1" "$(count_in 'releases/tag/v20.14.1' "$work/out.txt")"
+: >"$FAKE_LOG"
+ALVR_APK=$apk_dir/alvr_client_android.apk "$script_dir/install-quest-client.zsh" --download --yes >"$work/out.txt" 2>&1
+expect "install: a wrong download is refused" "1" "$(count_in 'not the file I expect' "$work/out.txt")"
+expect "install: the wrong download is removed" "1" "$([[ -e $apk_dir/alvr_client_android.apk ]]; print $?)"
+expect "install: nothing reached the Quest" "0" "$(count_in 'install' "$FAKE_LOG")"
+"$script_dir/install-quest-client.zsh" --bogus >/dev/null 2>&1
+expect "install: unknown option exits 2" "2" "$?"
 
 if (( failures > 0 )); then
     print -u2 "$failures test(s) failed."

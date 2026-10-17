@@ -47,7 +47,10 @@ or `--bind`; `--wired` and `--discover` are intentionally mutually exclusive.
 `scripts/install-quest-client.zsh` installs the official ALVR v20.14.1 Android client
 (`alvr_client_android.apk` from the ALVR GitHub release; set `ALVR_APK` to its path). It checks the
 APK's pinned SHA-256 on a private copy, installs that copy, and asks before it removes a different
-ALVR version from the Quest.
+ALVR version from the Quest. `--download` first fetches that release asset from GitHub when no
+local APK exists (the SHA-256 check still applies), and `--yes` replaces another ALVR version
+without asking. `scripts/quest-check.zsh` prints, read-only, the Quest that the scripts would use
+and its ALVR version; the management app's Play page uses it.
 
 ## Quest over Wi-Fi
 
