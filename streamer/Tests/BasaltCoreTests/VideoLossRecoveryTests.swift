@@ -225,14 +225,16 @@ final class VideoLossRecoveryEncoderTests: XCTestCase {
     private func run(frameCount: Int,
                      transportBusy: (Int) -> Bool = { _ in false },
                      dropsOutput: @escaping @Sendable (Int) -> Bool = { _ in false },
-                     pipelined: Set<Int> = []) throws -> Run {
+                     pipelined: Set<Int> = [],
+                     codec: VideoCodec = .h264) throws -> Run {
         let gate = VideoLossRecoveryGate()
         let lock = NSLock()
         var result = Run()
-        let encoder: H264Encoder
+        let encoder: VideoEncoder
         do {
-            encoder = try H264Encoder(width: 256, height: 256, fps: 72, bitrate: 4_000_000,
-                                      keyframeIntervalSeconds: 60) { annexB, isKeyframe, _ in
+            encoder = try VideoEncoder(width: 256, height: 256, fps: 72, bitrate: 4_000_000,
+                                       keyframeIntervalSeconds: 60,
+                                       codec: codec) { annexB, isKeyframe, _ in
                 lock.lock()
                 let index = result.allOutputs.count
                 result.allOutputs.append(annexB)
@@ -253,7 +255,7 @@ final class VideoLossRecoveryEncoderTests: XCTestCase {
                 if isKeyframe { gate.idrDelivered() }
             }
         } catch {
-            throw XCTSkip("VideoToolbox H.264 is unavailable here: \(error)")
+            throw XCTSkip("VideoToolbox \(codec.displayName) is unavailable here: \(error)")
         }
         var dropsByEncoder = 0
         encoder.onFrameEncoded = { _, dropped in
@@ -336,6 +338,61 @@ final class VideoLossRecoveryEncoderTests: XCTestCase {
         XCTAssertEqual(pictures.filter(\.isIDR).count, 2)
         // Output 11 was the first recovery IDR, and it was lost too.
         let (allPictures, _) = try self.pictures(result.allOutputs)
+        XCTAssertTrue(allPictures[11].isIDR)
+        XCTAssertTrue(allPictures[12].isIDR)
+    }
+
+    // MARK: HEVC: the same gate, checked against each P-frame's reference
+    // picture set instead of frame_num.
+
+    private func hevcPictures(_ units: [Data]) throws -> [HEVCReferenceParser.Picture] {
+        var parser = HEVCReferenceParser()
+        let pictures = units.compactMap { parser.parse(accessUnit: $0) }
+        XCTAssertEqual(pictures.count, units.count)
+        XCTAssertFalse(parser.longTermReferencesPresent,
+                       "the parser follows short-term references only")
+        return pictures
+    }
+
+    func testHEVCDroppingBeforeEncodeKeepsEveryReferenceWithoutAnIDR() throws {
+        let result = try run(frameCount: 30, transportBusy: { (10..<16).contains($0) },
+                             codec: .hevc)
+        let pictures = try hevcPictures(result.delivered)
+        XCTAssertEqual(pictures.count, 24)
+        XCTAssertEqual(pictures.filter(\.isIDR).count, 1, "only the stream's first IDR")
+        XCTAssertTrue(pictures.dropFirst().allSatisfy { !$0.referencePOCs.isEmpty },
+                      "VideoToolbox HEVC P-frames predict from earlier pictures")
+        XCTAssertEqual(HEVCReferenceParser.missingReferences(pictures), [])
+        XCTAssertEqual(result.discarded, 0)
+    }
+
+    func testHEVCEncodedFrameLostAfterEncodingWouldLeaveAMissingReference() throws {
+        let result = try run(frameCount: 20, codec: .hevc)
+        var naive = result.allOutputs
+        naive.remove(at: 10)
+        let pictures = try hevcPictures(naive)
+        XCTAssertEqual(HEVCReferenceParser.missingReferences(pictures).first, 10)
+    }
+
+    func testHEVCLostEncodedFrameHoldsPFramesUntilAForcedIDRIsSent() throws {
+        let result = try run(frameCount: 24, dropsOutput: { $0 == 10 }, pipelined: [10],
+                             codec: .hevc)
+        XCTAssertEqual(result.discarded, 1)
+        let pictures = try hevcPictures(result.delivered)
+        XCTAssertEqual(HEVCReferenceParser.missingReferences(pictures), [])
+        XCTAssertEqual(pictures.filter(\.isIDR).count, 2)
+        XCTAssertTrue(pictures[10].isIDR)
+        XCTAssertEqual(pictures.count, result.allOutputs.count - 2)
+    }
+
+    func testHEVCLostRecoveryIDRIsForcedAgain() throws {
+        let result = try run(frameCount: 24, dropsOutput: { $0 == 10 || $0 == 11 },
+                             codec: .hevc)
+        let pictures = try hevcPictures(result.delivered)
+        XCTAssertEqual(HEVCReferenceParser.missingReferences(pictures), [])
+        XCTAssertTrue(pictures[10].isIDR)
+        XCTAssertEqual(pictures.filter(\.isIDR).count, 2)
+        let allPictures = try hevcPictures(result.allOutputs)
         XCTAssertTrue(allPictures[11].isIDR)
         XCTAssertTrue(allPictures[12].isIDR)
     }

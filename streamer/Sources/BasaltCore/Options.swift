@@ -46,6 +46,8 @@ public struct StreamerOptions: Equatable {
     /// requests for recovery do not depend on this.
     public var keyframeIntervalSeconds = 2
     public var entropyMode = H264EntropyMode.cabac
+    /// The stream codec. Not part of a profile until HEVC has a headset A/B.
+    public var codec = VideoCodec.h264
     public var controllerPrediction = ControllerPrediction.full
 
     public init() {}
@@ -53,7 +55,7 @@ public struct StreamerOptions: Equatable {
     public static let usage = """
         usage: basalt-streamer [options]
 
-        Captures the main display, hardware-encodes H.264 (low-latency),
+        Captures the main display, hardware-encodes H.264 or HEVC (low-latency),
         and serves the raw Annex-B stream to connected TCP clients.
 
         options:
@@ -73,9 +75,12 @@ public struct StreamerOptions: Equatable {
           --idr-interval <seconds>
                         longest gap between periodic IDR frames, 1–60
                         (default 2); headset recovery requests still apply
+          --codec <h264|hevc>
+                        stream codec (default h264); hevc is HEVC Main,
+                        8-bit, hardware VideoToolbox
           --entropy <cabac|cavlc>
                         H.264 entropy coding (default cabac; ALVR's own
-                        encoders default to cavlc)
+                        encoders default to cavlc); h264 only
           --controller-prediction <full|alvr>
                         full (default) asks the Quest to predict controllers
                         as far ahead as the head; alvr keeps ALVR's shorter
@@ -114,6 +119,7 @@ public struct StreamerOptions: Equatable {
         var explicitMegabits = false
         var explicitResolution = false
         var explicitLatency = false
+        var explicitEntropy = false
 
         func nextValue(for flag: String) throws -> String {
             guard !arguments.isEmpty else { throw BasaltError("\(flag) requires a value") }
@@ -173,6 +179,14 @@ public struct StreamerOptions: Equatable {
                     throw BasaltError("--entropy expects cabac or cavlc")
                 }
                 options.entropyMode = mode
+                explicitEntropy = true
+            case "--codec":
+                let value = try nextValue(for: flag).lowercased()
+                let aliases: [String: VideoCodec] = ["h265": .hevc, "avc": .h264]
+                guard let codec = VideoCodec(rawValue: value) ?? aliases[value] else {
+                    throw BasaltError("--codec expects h264 or hevc")
+                }
+                options.codec = codec
             case "--controller-prediction":
                 let value = try nextValue(for: flag).lowercased()
                 guard let prediction = ControllerPrediction(rawValue: value) else {
@@ -206,6 +220,9 @@ public struct StreamerOptions: Equatable {
             if !explicitMegabits { options.megabits = profile.megabits }
             if !explicitResolution { options.perEyeResolution = profile.perEyeResolution }
             if !explicitLatency { options.latencyPreset = profile.latencyPreset }
+        }
+        guard !explicitEntropy || options.codec == .h264 else {
+            throw BasaltError("--entropy applies only to --codec h264 (HEVC always uses CABAC)")
         }
         guard !(options.discover && options.wired) else {
             throw BasaltError("--wireless and --wired cannot be used together")

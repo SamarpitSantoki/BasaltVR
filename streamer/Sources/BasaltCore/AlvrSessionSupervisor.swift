@@ -40,6 +40,7 @@ public struct AlvrClientSessionRequest: Sendable {
     public var preferredRefreshRate: Float
     public var latencyPreset: StreamLatencyPreset
     public var controllerPrediction: ControllerPrediction
+    public var codec: VideoCodec
     public var trackingTimeoutNanoseconds: UInt64
 
     public init(host: String,
@@ -53,7 +54,9 @@ public struct AlvrClientSessionRequest: Sendable {
                 preferredRefreshRate: Float,
                 latencyPreset: StreamLatencyPreset,
                 controllerPrediction: ControllerPrediction,
+                codec: VideoCodec = .h264,
                 trackingTimeoutNanoseconds: UInt64 = 10_000_000_000) {
+        self.codec = codec
         self.host = host
         self.controlPort = controlPort
         self.streamPort = streamPort
@@ -105,7 +108,8 @@ public final class AlvrClientSession: AlvrLiveSession, @unchecked Sendable {
             preferredRefreshRate: request.preferredRefreshRate,
             latencyPreset: request.latencyPreset,
             wired: request.wired,
-            controllerPrediction: request.controllerPrediction)
+            controllerPrediction: request.controllerPrediction,
+            codec: request.codec)
         do {
             guard case .accepted(let protocolId, _, _, _) = handshake.clientState else {
                 throw BasaltError("ALVR headset is in standby")
