@@ -113,4 +113,49 @@ final class OptionsTests: XCTestCase {
         }
         XCTAssertThrowsError(try StreamerOptions.parse(["--latency", "extreme"]))
     }
+
+    func testM3ProProfileSuppliesDefaultsAndExplicitFlagsWin() throws {
+        let profile = try XCTUnwrap(StreamerOptions.parse(["--wired", "--profile", "M3Pro"]))
+        XCTAssertEqual(profile.profile, .m3pro)
+        XCTAssertEqual(profile.fps, 72)
+        XCTAssertEqual(profile.megabits, 30)
+        XCTAssertEqual(profile.perEyeResolution, .balanced)
+        XCTAssertEqual(profile.latencyPreset, .low)
+
+        // Explicit flags win before and after the profile.
+        let before = try XCTUnwrap(StreamerOptions.parse(
+            ["--mbps", "45", "--resolution", "quality", "--profile", "m3pro"]))
+        let after = try XCTUnwrap(StreamerOptions.parse(
+            ["--profile", "m3pro", "--mbps", "45", "--resolution", "quality"]))
+        XCTAssertEqual(before, after)
+        XCTAssertEqual(after.megabits, 45)
+        XCTAssertEqual(after.perEyeResolution, .quality)
+        XCTAssertEqual(after.fps, 72)
+        XCTAssertEqual(after.latencyPreset, .low)
+
+        XCTAssertThrowsError(try StreamerOptions.parse(["--profile", "m1"]))
+        XCTAssertNil(try XCTUnwrap(StreamerOptions.parse([])).profile)
+    }
+
+    func testKeyframeIntervalAndEntropy() throws {
+        let defaults = try XCTUnwrap(StreamerOptions.parse([]))
+        XCTAssertEqual(defaults.keyframeIntervalSeconds, 2)
+        XCTAssertEqual(defaults.entropyMode, .cabac)
+
+        let tuned = try XCTUnwrap(StreamerOptions.parse(
+            ["--idr-interval", "10", "--entropy", "CAVLC"]))
+        XCTAssertEqual(tuned.keyframeIntervalSeconds, 10)
+        XCTAssertEqual(tuned.entropyMode, .cavlc)
+
+        XCTAssertThrowsError(try StreamerOptions.parse(["--idr-interval", "0"]))
+        XCTAssertThrowsError(try StreamerOptions.parse(["--idr-interval", "61"]))
+        XCTAssertThrowsError(try StreamerOptions.parse(["--entropy", "huffman"]))
+    }
+
+    func testControllerPrediction() throws {
+        XCTAssertEqual(try StreamerOptions.parse([])?.controllerPrediction, .full)
+        XCTAssertEqual(try StreamerOptions.parse(
+            ["--controller-prediction", "ALVR"])?.controllerPrediction, .alvr)
+        XCTAssertThrowsError(try StreamerOptions.parse(["--controller-prediction", "none"]))
+    }
 }

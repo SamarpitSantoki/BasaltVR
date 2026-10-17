@@ -10,7 +10,7 @@
  *
  * Usage: basalt_control_test_daemon --control-file <path> [--expect-frames N]
  *        [--frame-delay-ms N] [--view-width N --view-height N]
- *        [--verify-clears | --compositor-scenarios]
+ *        [--display-period-ns N] [--verify-clears | --compositor-scenarios]
  *
  * --compositor-scenarios pairs with d3d11_compositor_smoke.exe: every
  * FrameReady is checked against basalt_compositor_scenarios.h by reading
@@ -82,6 +82,8 @@ static bool g_head_turned = false;
 static unsigned int g_frame_delay_ms = 0;
 static unsigned int g_view_width = 0;
 static unsigned int g_view_height = 0;
+/* HELLO_ACK display period; the runtime paces xrWaitFrame to it. */
+static uint64_t g_display_period_ns = BASALT_CONTROL_DEFAULT_DISPLAY_PERIOD_NS;
 
 static uint16_t read_u16(const uint8_t* p) { uint16_t v; memcpy(&v, p, 2); return v; }
 static uint32_t read_u32(const uint8_t* p) { uint32_t v; memcpy(&v, p, 4); return v; }
@@ -735,6 +737,8 @@ int main(int argc, char** argv) {
             g_view_width = (unsigned int)strtoul(argv[++i], NULL, 10);
         } else if (strcmp(argv[i], "--view-height") == 0 && i + 1 < argc) {
             g_view_height = (unsigned int)strtoul(argv[++i], NULL, 10);
+        } else if (strcmp(argv[i], "--display-period-ns") == 0 && i + 1 < argc) {
+            g_display_period_ns = strtoull(argv[++i], NULL, 10);
         } else {
             control_file = NULL;  // Reported as a usage error below.
             break;
@@ -747,6 +751,7 @@ int main(int argc, char** argv) {
           g_view_height != BASALT_COMPOSITOR_VIEW_HEIGHT))) {
         fprintf(stderr, "usage: %s --control-file <path> [--expect-frames N] "
                         "[--frame-delay-ms N] [--view-width N --view-height N] "
+                        "[--display-period-ns N] "
                         "[--verify-clears | --compositor-scenarios]\n",
                 argv[0]);
         return 2;
@@ -881,9 +886,10 @@ int main(int argc, char** argv) {
                 break;
             }
             printf("daemon: hello from session %" PRIu64 " (%s)\n", session_id, renderer);
-            uint8_t ack[2];
+            uint8_t ack[2 + 8];
             const uint16_t accepted = BASALT_CONTROL_PROTOCOL_VERSION;
             memcpy(ack, &accepted, 2);
+            memcpy(ack + 2, &g_display_period_ns, 8);
             ok = send_message(fd, BASALT_MSG_HELLO_ACK, ack, sizeof(ack));
             if (ok) {
                 ok = send_view_config(fd) &&

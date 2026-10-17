@@ -12,7 +12,6 @@
 
 namespace {
 
-constexpr XrDuration kDisplayPeriod = 13'888'889;
 // A session emits at most ten state changes (IDLE through EXITING), and state
 // changes are never dropped, so the queue always has room to shed the oldest
 // other event when an application stops polling.
@@ -629,6 +628,8 @@ XrResult XRAPI_CALL waitFrame(
     // lifecycle lock across it.
     ReleaseSRWLockExclusive(&gLifecycleLock);
     controlWaitForFrameBudget(session);
+    // The negotiated headset refresh period (HELLO_ACK); 72 Hz when headless.
+    const XrDuration displayPeriod = controlDisplayPeriod(session);
     AcquireSRWLockExclusive(&gLifecycleLock);
     if (!lifecycleMatchesLocked(session)) {
         ReleaseSRWLockExclusive(&gLifecycleLock);
@@ -660,22 +661,22 @@ XrResult XRAPI_CALL waitFrame(
     // time. This preserves the requested average cadence without issuing
     // catch-up frames when the process misses a whole display period.
     XrTime nextDeadline = waitDeadline == 0
-                              ? now + kDisplayPeriod
-                              : waitDeadline + kDisplayPeriod;
+                              ? now + displayPeriod
+                              : waitDeadline + displayPeriod;
     if (nextDeadline <= now) {
         const XrDuration missed = now - nextDeadline;
-        nextDeadline += (missed / kDisplayPeriod + 1) * kDisplayPeriod;
+        nextDeadline += (missed / displayPeriod + 1) * displayPeriod;
     }
     gNextWaitDeadline = nextDeadline;
 
     const XrTime predictedDisplayTime = std::max(
-        now + kDisplayPeriod,
+        now + displayPeriod,
         gLastPrediction == 0 ? static_cast<XrTime>(1)
-                             : gLastPrediction + kDisplayPeriod);
+                             : gLastPrediction + displayPeriod);
     gLastPrediction = predictedDisplayTime;
     gWaitToken = true;
     frameState->predictedDisplayTime = predictedDisplayTime;
-    frameState->predictedDisplayPeriod = kDisplayPeriod;
+    frameState->predictedDisplayPeriod = displayPeriod;
     // With the streamer daemon consuming frames, submitted images are
     // displayed; headless sessions keep telling the app not to render.
     frameState->shouldRender = controlActive(session) ? XR_TRUE : XR_FALSE;

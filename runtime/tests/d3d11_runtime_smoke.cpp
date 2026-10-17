@@ -1144,8 +1144,14 @@ int main(int argc, char** argv) {
     frameState.next = frameStateNext;
     result = xrWaitFrame(session, nullptr, &frameState);
     const XrBool32 expectedShouldRender = expectConnected() ? XR_TRUE : XR_FALSE;
+    // The daemon's HELLO_ACK display period paces a connected session;
+    // headless sessions keep the 72 Hz default.
+    const XrDuration expectedDisplayPeriod = expectConnected()
+        ? static_cast<XrDuration>(expectedViewDimension(
+              "BASALT_EXPECT_DISPLAY_PERIOD_NS", 13'888'889))
+        : 13'888'889;
     if (XR_FAILED(result) || frameState.predictedDisplayTime <= 0 ||
-        frameState.predictedDisplayPeriod <= 0 ||
+        frameState.predictedDisplayPeriod != expectedDisplayPeriod ||
         frameState.shouldRender != expectedShouldRender ||
         frameState.next != frameStateNext) {
         xrDestroySession(session);
