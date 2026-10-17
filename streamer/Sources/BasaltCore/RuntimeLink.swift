@@ -12,7 +12,8 @@ import Security
 /// launcher hands the game bottle via BASALT_CONTROL, validates the Hello
 /// token, retains every registered swapchain IOSurface (IDs are untrusted:
 /// dimensions are re-checked after lookup), and surfaces fence-confirmed
-/// frames to `onFrame`. One runtime connection at a time.
+/// frames to `onFrame`. One live runtime connection at a time; a newer
+/// authenticated Hello replaces it (see `admitCandidate`).
 public final class RuntimeLink: @unchecked Sendable {
     /// Acknowledges one frame to the runtime, exactly once. Holders must keep
     /// it alive until their reads of the frame's surfaces finish: releasing
@@ -127,6 +128,9 @@ public final class RuntimeLink: @unchecked Sendable {
     /// The streamer prefixes refusal reasons with this on stderr so the
     /// manager can surface them; the game itself only sees a headless session.
     public static let connectionRefusedLogPrefix = "OpenXR runtime connection refused: "
+    /// A newer authenticated runtime session replaced the live one. Called on
+    /// the link's queue just before the old connection is torn down.
+    public var onReplaced: (() -> Void)?
     private var hapticHandler: ((_ hand: AlvrHand, _ durationNanoseconds: UInt64,
                                  _ frequency: Float, _ amplitude: Float) -> Void)?
 
@@ -136,6 +140,11 @@ public final class RuntimeLink: @unchecked Sendable {
     private let queue = DispatchQueue(label: "basalt.runtime-link")
     private let listener: NWListener
     private var connection: NWConnection?
+    /// Connections that arrived while another one is live, waiting for their
+    /// first message. Only an authenticated Hello may replace the live one.
+    private var candidates: [ObjectIdentifier: (connection: NWConnection, buffer: Data)] = [:]
+    static let maximumCandidateConnections = 4
+    static let candidateHelloTimeout: DispatchTimeInterval = .seconds(5)
     private var receiveBuffer = Data()
     private var helloDone = false
     private var swapchains: [UInt64: Swapchain] = [:]
@@ -295,6 +304,8 @@ public final class RuntimeLink: @unchecked Sendable {
 
     public func stop() {
         queue.async {
+            for candidate in self.candidates.values { candidate.connection.cancel() }
+            self.candidates.removeAll()
             self.dropConnection()
             self.listener.cancel()
             try? FileManager.default.removeItem(atPath: self.controlFilePath)
@@ -577,11 +588,18 @@ public final class RuntimeLink: @unchecked Sendable {
 
     private func accept(_ newConnection: NWConnection) {
         guard connection == nil else {
-            newConnection.cancel()
+            admitCandidate(newConnection)
             return
         }
+        newConnection.start(queue: queue)
+        activate(newConnection, buffered: Data())
+    }
+
+    /// Makes `newConnection` (already started) the live connection and
+    /// processes any bytes it has already sent.
+    private func activate(_ newConnection: NWConnection, buffered: Data) {
         connection = newConnection
-        receiveBuffer.removeAll()
+        receiveBuffer = buffered
         helloDone = false
         newConnection.stateUpdateHandler = { [weak self, weak newConnection] state in
             guard case .failed = state, let self, let newConnection else { return }
@@ -589,8 +607,94 @@ public final class RuntimeLink: @unchecked Sendable {
             // successor (e.g. a quick OpenXR session restart).
             self.onQueue(ifCurrent: newConnection) { self.dropConnection() }
         }
-        newConnection.start(queue: queue)
+        if !receiveBuffer.isEmpty, !drainMessages() {
+            dropConnection()
+            return
+        }
         receiveMore()
+    }
+
+    /// A connection that arrives while another is live. The live one may be
+    /// stale: a game that launches its successor with inherited handles and
+    /// exits (The Lab -> Robot Repair) leaves the old socket open in the
+    /// child, so it never closes. The newcomer's first message decides: an
+    /// authenticated Hello replaces the live session (newest wins, as with
+    /// SteamVR scene apps); anything else is dropped and the live one stays.
+    private func admitCandidate(_ newConnection: NWConnection) {
+        if candidates.count >= Self.maximumCandidateConnections,
+           let oldest = candidates.keys.first {
+            candidates.removeValue(forKey: oldest)?.connection.cancel()
+        }
+        let key = ObjectIdentifier(newConnection)
+        candidates[key] = (newConnection, Data())
+        newConnection.stateUpdateHandler = { [weak self] state in
+            guard case .failed = state, let self else { return }
+            self.queue.async { self.discardCandidate(key) }
+        }
+        newConnection.start(queue: queue)
+        queue.asyncAfter(deadline: .now() + Self.candidateHelloTimeout) { [weak self] in
+            self?.discardCandidate(key)
+        }
+        receiveCandidate(key)
+    }
+
+    private func discardCandidate(_ key: ObjectIdentifier) {
+        candidates.removeValue(forKey: key)?.connection.cancel()
+    }
+
+    private func receiveCandidate(_ key: ObjectIdentifier) {
+        guard let candidate = candidates[key] else { return }
+        candidate.connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) {
+            [weak self] data, _, isComplete, error in
+            guard let self, self.candidates[key] != nil else { return }
+            if let data, !data.isEmpty {
+                self.candidates[key]?.buffer.append(data)
+            }
+            guard let buffer = self.candidates[key]?.buffer else { return }
+            switch Self.candidateFirstMessage(buffer, token: self.token) {
+            case .incomplete:
+                if isComplete || error != nil {
+                    self.discardCandidate(key)
+                } else {
+                    self.receiveCandidate(key)
+                }
+            case .reject(let reason):
+                if let reason { self.onProtocolError?(reason) }
+                self.discardCandidate(key)
+            case .accept:
+                guard let promoted = self.candidates.removeValue(forKey: key) else { return }
+                if self.connection != nil {
+                    self.onReplaced?()
+                    self.dropConnection()
+                }
+                self.activate(promoted.connection, buffered: promoted.buffer)
+            }
+        }
+    }
+
+    enum CandidateVerdict: Equatable {
+        case incomplete
+        /// Drop the candidate; a reason is reported only for an authenticated
+        /// runtime that cannot start (stale build, malformed Hello).
+        case reject(String?)
+        case accept
+    }
+
+    /// Classifies a candidate's buffered bytes by their first message.
+    static func candidateFirstMessage(_ buffer: Data, token: String) -> CandidateVerdict {
+        guard buffer.count >= 6 else { return .incomplete }
+        let length = buffer.readU32(at: 0)
+        guard length >= 2, length <= maxMessageLength,
+              buffer.readU16(at: 4) == MessageType.hello.rawValue else {
+            return .reject(nil)
+        }
+        guard buffer.count >= 4 + Int(length) else { return .incomplete }
+        let payload = buffer.subdata(in: (buffer.startIndex + 6)..<(buffer.startIndex + 4 + Int(length)))
+        switch helloVerdict(payload, token: token) {
+        case .accept: return .accept
+        case .ignore: return .reject(nil)
+        case .refuse(let reason): return .reject(reason)
+        }
     }
 
     /// Runs `body` on `queue` only while `expected` is still the live

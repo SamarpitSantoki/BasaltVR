@@ -473,7 +473,15 @@ final class BottleManagerTests: XCTestCase {
         try Data([0x4d, 0x5a]).write(to: beatSaber)
         try Data([0x4d, 0x5a]).write(to: steam)
         let originalHelper = Data([0x4d, 0x5a, 0x10])
-        let compatibilityShim = Data([0x4d, 0x5a, 0x20])
+        func shimBytes(_ build: UInt8) -> Data {
+            var data = Data([0x4d, 0x5a, build])
+            for unit in "steamwebhelper.basalt-original.exe".utf16 {
+                data.append(UInt8(unit & 0xff))
+                data.append(UInt8(unit >> 8))
+            }
+            return data
+        }
+        let compatibilityShim = shimBytes(0x20)
         try originalHelper.write(to: webHelper)
         try compatibilityShim.write(to: compatibilityArtifact)
         try FileManager.default.setAttributes(
@@ -526,6 +534,23 @@ final class BottleManagerTests: XCTestCase {
         _ = try manager.installSteamWebHelperCompatibility(forProfile: "beat-saber")
         XCTAssertEqual(try Data(contentsOf: webHelper), compatibilityShim)
         XCTAssertEqual(try Data(contentsOf: preservedHelper), updatedHelper)
+
+        // A shim from another Basalt build (another checkout or worktree) is
+        // installed. It must be replaced, never preserved as the original:
+        // a preserved shim launches itself without end (a process storm).
+        let otherBuildShim = shimBytes(0x21)
+        try otherBuildShim.write(to: webHelper)
+        _ = try manager.installSteamWebHelperCompatibility(forProfile: "beat-saber")
+        XCTAssertEqual(try Data(contentsOf: webHelper), compatibilityShim)
+        XCTAssertEqual(try Data(contentsOf: preservedHelper), updatedHelper)
+
+        // A preserved "original" that is a shim (left by an older Basalt) is
+        // refused, and the installed helper is not touched.
+        try otherBuildShim.write(to: preservedHelper)
+        XCTAssertThrowsError(
+            try manager.installSteamWebHelperCompatibility(forProfile: "beat-saber"))
+        XCTAssertEqual(try Data(contentsOf: webHelper), compatibilityShim)
+        try updatedHelper.write(to: preservedHelper)
 
         let bootstrap = try XCTUnwrap(
             manager.steamBootstrapCommand(forProfile: "beat-saber"))
