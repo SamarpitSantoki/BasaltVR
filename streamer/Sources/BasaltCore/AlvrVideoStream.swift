@@ -265,16 +265,21 @@ public struct AlvrVideoSendReport: Equatable, Sendable {
     public let shardCount: Int
     public let isIDR: Bool
     public let durationNanoseconds: UInt64
+    /// Mac-side time from the arrival of the tracking packet whose timestamp
+    /// this frame carries to the end of this write; nil when that packet is
+    /// no longer in the sender's recent history (or the timestamp is 0).
+    public let trackingAgeNanoseconds: UInt64?
 
     public init(timestampNanoseconds: UInt64, accessUnitBytes: Int,
                 wireBytes: Int, shardCount: Int, isIDR: Bool,
-                durationNanoseconds: UInt64) {
+                durationNanoseconds: UInt64, trackingAgeNanoseconds: UInt64? = nil) {
         self.timestampNanoseconds = timestampNanoseconds
         self.accessUnitBytes = accessUnitBytes
         self.wireBytes = wireBytes
         self.shardCount = shardCount
         self.isIDR = isIDR
         self.durationNanoseconds = durationNanoseconds
+        self.trackingAgeNanoseconds = trackingAgeNanoseconds
     }
 }
 
@@ -307,6 +312,8 @@ public final class AlvrVideoStreamSender: @unchecked Sendable {
     public var onControllerMotion: ((_ timestampNanoseconds: UInt64, _ hand: AlvrHand,
                                      _ motion: AlvrControllerMotion) -> Void)?
     public var onControllerMask: ((_ timestampNanoseconds: UInt64, _ activeMask: UInt32) -> Void)?
+    /// Every decoded tracking packet, with or without poses, in arrival order.
+    public var onTrackingTimestamp: ((_ timestampNanoseconds: UInt64) -> Void)?
     public var onFrameSent: ((AlvrVideoSendReport) -> Void)?
     public var onAudioSent: ((AlvrAudioSendReport) -> Void)?
     public var onAudioDropped: (() -> Void)?
@@ -330,6 +337,7 @@ public final class AlvrVideoStreamSender: @unchecked Sendable {
     private var lastCongestionRecovery = DispatchTime(uptimeNanoseconds: 0)
     private var latestTrackingTimestamp: UInt64?
     private var latestTrackingArrival = DispatchTime(uptimeNanoseconds: 0)
+    private var trackingArrivals = TrackingArrivalHistory()
     private var trackingReadyCallback: (() -> Void)?
     private var tcpReceiveBuffer = Data()
     private var transportFailed = false
@@ -461,14 +469,21 @@ public final class AlvrVideoStreamSender: @unchecked Sendable {
                     guard try sendShard(shard, deadline: deadline) else { return }
                     wireBytes += shard.count
                 }
-                let duration = DispatchTime.now().uptimeNanoseconds &- startedAt
+                let finishedAt = DispatchTime.now().uptimeNanoseconds
+                let duration = finishedAt &- startedAt
+                stateLock.lock()
+                let arrival = trackingArrivals.arrival(ofTimestamp: timestampNanoseconds)
+                stateLock.unlock()
                 onFrameSent?(AlvrVideoSendReport(
                     timestampNanoseconds: timestampNanoseconds,
                     accessUnitBytes: annexB.count,
                     wireBytes: wireBytes,
                     shardCount: shards.count,
                     isIDR: isIDR,
-                    durationNanoseconds: duration))
+                    durationNanoseconds: duration,
+                    trackingAgeNanoseconds: arrival.map {
+                        finishedAt >= $0 ? finishedAt - $0 : 0
+                    }))
             } catch {
                 if transport == .tcp {
                     failTCPTransport()
@@ -624,9 +639,13 @@ public final class AlvrVideoStreamSender: @unchecked Sendable {
             let isFirstTrackingPacket = latestTrackingTimestamp == nil
             latestTrackingTimestamp = timestamp
             latestTrackingArrival = .now()
+            trackingArrivals.record(
+                timestampNanoseconds: timestamp,
+                arrivalNanoseconds: latestTrackingArrival.uptimeNanoseconds)
             let callback = trackingReadyCallback
             stateLock.unlock()
             if isFirstTrackingPacket { callback?() }
+            onTrackingTimestamp?(timestamp)
             if let headPose { onHeadPose?(timestamp, headPose) }
             if let leftController { onControllerMotion?(timestamp, .left, leftController) }
             if let rightController { onControllerMotion?(timestamp, .right, rightController) }

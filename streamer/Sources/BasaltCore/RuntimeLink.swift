@@ -59,9 +59,14 @@ public final class RuntimeLink: @unchecked Sendable {
         case frameConsumed = 17
     }
 
-    public static let protocolVersion: UInt16 = 9
+    public static let protocolVersion: UInt16 = 10
     static let tokenLength = 32
     static let maxMessageLength = 4096
+    /// HELLO_ACK display-period bounds (240 Hz to 30 Hz) and the runtime's
+    /// default (72 Hz), mirrored from basalt_control_protocol.h.
+    static let minimumDisplayPeriodNanoseconds: UInt64 = 4_166_666
+    static let maximumDisplayPeriodNanoseconds: UInt64 = 33_333_334
+    static let defaultDisplayPeriodNanoseconds: UInt64 = 13_888_889
     /// The runtime's largest per-eye view; it ignores a larger configured size.
     public static let maximumViewWidth = 1680
     public static let maximumViewHeight = 1760
@@ -141,6 +146,35 @@ public final class RuntimeLink: @unchecked Sendable {
     private var latestControllerMaskPayload: Data?
     private var completedFrameNumbers = Set<UInt64>()
     private var lastAcknowledgedFrameNumber: UInt64 = 0
+    private var displayPeriodNanoseconds = defaultDisplayPeriodNanoseconds
+
+    /// Sets the headset refresh rate that the runtime's xrWaitFrame paces to.
+    /// It is sent in HELLO_ACK, so it applies to runtime sessions that
+    /// connect after this call. Returns false (and keeps the previous value)
+    /// for a rate outside 30–240 Hz.
+    @discardableResult
+    public func setDisplayRefreshRate(_ hertz: Float) -> Bool {
+        guard let period = Self.displayPeriodNanoseconds(refreshRate: hertz) else {
+            return false
+        }
+        queue.async { self.displayPeriodNanoseconds = period }
+        return true
+    }
+
+    static func displayPeriodNanoseconds(refreshRate hertz: Float) -> UInt64? {
+        guard hertz.isFinite, hertz > 0 else { return nil }
+        let period = (1_000_000_000 / Double(hertz)).rounded()
+        guard period >= Double(minimumDisplayPeriodNanoseconds),
+              period <= Double(maximumDisplayPeriodNanoseconds) else { return nil }
+        return UInt64(period)
+    }
+
+    static func helloAckPayload(displayPeriodNanoseconds: UInt64) -> Data {
+        var ack = Data()
+        ack.appendU16(protocolVersion)
+        ack.appendU64(displayPeriodNanoseconds)
+        return ack
+    }
 
     public init(
         controlFilePath: String,
@@ -655,9 +689,8 @@ public final class RuntimeLink: @unchecked Sendable {
             return false
         }
         helloDone = true
-        var ack = Data()
-        ack.appendU16(Self.protocolVersion)
-        send(type: .helloAck, payload: ack)
+        send(type: .helloAck, payload: Self.helloAckPayload(
+            displayPeriodNanoseconds: displayPeriodNanoseconds))
         onHello?(sessionId, renderer)
         pumpHeadPose()
         pumpControllerMotion()

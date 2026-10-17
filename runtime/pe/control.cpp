@@ -144,6 +144,15 @@ uint64_t gLastConsumedFrameNumber = 0;
 PendingFrame gPendingFrames[kPendingFrameCapacity]{};
 size_t gPendingHead = 0;
 size_t gPendingCount = 0;
+// Headset refresh period from HELLO_ACK; the 72 Hz default while headless.
+XrDuration gDisplayPeriod = BASALT_CONTROL_DEFAULT_DISPLAY_PERIOD_NS;
+
+XrDuration sanitizedDisplayPeriod(uint64_t period) {
+    return period >= BASALT_CONTROL_MIN_DISPLAY_PERIOD_NS &&
+                   period <= BASALT_CONTROL_MAX_DISPLAY_PERIOD_NS
+               ? static_cast<XrDuration>(period)
+               : static_cast<XrDuration>(BASALT_CONTROL_DEFAULT_DISPLAY_PERIOD_NS);
+}
 
 void resetSystemButtonLocked() {
     gSystemButtonPressTime = 0;
@@ -794,6 +803,7 @@ DisconnectState beginDisconnectLocked() {
     resetTrackingStateLocked();
     gPendingHead = 0;
     gPendingCount = 0;
+    gDisplayPeriod = BASALT_CONTROL_DEFAULT_DISPLAY_PERIOD_NS;
     WakeAllConditionVariable(&gAckCondition);
     WakeAllConditionVariable(&gFrameDeliveryCondition);
     return state;
@@ -1164,22 +1174,25 @@ void controlSessionCreated(XrSession session, ID3D11Device* device) {
             break;
         }
 
-        uint8_t ack[8]{};
+        uint8_t ack[16]{};
         size_t ackLength = 0;
         uint16_t acceptedVersion = 0;
+        uint64_t displayPeriod = 0;
         if (!recvExpectedMessage(
                 gSocket, BASALT_MSG_HELLO_ACK, ack, sizeof(ack), &ackLength) ||
-            ackLength != sizeof(acceptedVersion)) {
+            ackLength != sizeof(acceptedVersion) + sizeof(displayPeriod)) {
             closesocket(gSocket);
             gSocket = INVALID_SOCKET;
             break;
         }
         std::memcpy(&acceptedVersion, ack, sizeof(acceptedVersion));
+        std::memcpy(&displayPeriod, ack + sizeof(acceptedVersion), sizeof(displayPeriod));
         if (acceptedVersion != BASALT_CONTROL_PROTOCOL_VERSION) {
             closesocket(gSocket);
             gSocket = INVALID_SOCKET;
             break;
         }
+        gDisplayPeriod = sanitizedDisplayPeriod(displayPeriod);
 
         gWaiterWake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         gFenceEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -1241,6 +1254,16 @@ bool controlActive(XrSession session) {
                         gSocket != INVALID_SOCKET && !gReceiverFailed;
     ReleaseSRWLockShared(&gControlLock);
     return active;
+}
+
+XrDuration controlDisplayPeriod(XrSession session) {
+    AcquireSRWLockShared(&gControlLock);
+    const XrDuration period =
+        session != XR_NULL_HANDLE && gControlSession == session
+            ? gDisplayPeriod
+            : static_cast<XrDuration>(BASALT_CONTROL_DEFAULT_DISPLAY_PERIOD_NS);
+    ReleaseSRWLockShared(&gControlLock);
+    return period;
 }
 
 void controlNotePredictedDisplayTime(XrSession session, XrTime predictedDisplayTime) {
