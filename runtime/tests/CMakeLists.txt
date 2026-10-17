@@ -29,6 +29,11 @@ target_link_libraries(dxmt_fence_probe PRIVATE d3d11 dxgi dxguid)
 target_compile_options(dxmt_fence_probe PRIVATE -Wall -Wextra -Wpedantic)
 target_link_options(dxmt_fence_probe PRIVATE -static -static-libgcc -static-libstdc++)
 
+add_executable(dxmt_msaa_probe dxmt_msaa_probe.cpp)
+target_link_libraries(dxmt_msaa_probe PRIVATE d3d11 d3dcompiler dxgi dxguid)
+target_compile_options(dxmt_msaa_probe PRIVATE -Wall -Wextra -Wpedantic)
+target_link_options(dxmt_msaa_probe PRIVATE -static -static-libgcc -static-libstdc++)
+
 add_executable(dxmt_window_swapchain_probe WIN32 dxmt_window_swapchain_probe.cpp)
 target_link_libraries(dxmt_window_swapchain_probe PRIVATE d3d11 dxgi dxguid user32)
 target_compile_options(dxmt_window_swapchain_probe PRIVATE -Wall -Wextra -Wpedantic)
