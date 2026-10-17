@@ -119,8 +119,13 @@ public enum AlvrStreamConfigEncoder {
     /// 3.0 in v20.11, 2.1 in v20.14) less than the head, because SteamVR is
     /// expected to extrapolate the rest; Basalt's runtime does not, so with the
     /// ALVR default the controllers lag the head by 2–3 frames.
+    ///
+    /// `codec` is sent as `video.preferred_codec`, as the stock server's full
+    /// session settings carry it. The v20 client takes the codec that it
+    /// decodes from each `DecoderConfig` packet, not from this field.
     public static func payload(settings: AlvrNegotiatedSettings, wired: Bool = false,
-                               controllerPrediction: ControllerPrediction = .full) throws -> Data {
+                               controllerPrediction: ControllerPrediction = .full,
+                               codec: VideoCodec = .h264) throws -> Data {
         // ALVR v20's fuzzy merge requires the session_settings key. These
         // values come from the selected, explicit latency preset; balanced is
         // the validated baseline and low trims only 0.2 buffered frame.
@@ -128,6 +133,9 @@ public enum AlvrStreamConfigEncoder {
             "video": [
                 "max_buffering_frames": settings.maximumBufferingFrames,
                 "buffering_history_weight": settings.bufferingHistoryWeight,
+                // A session-JSON Choice is {"variant": name}
+                // (`alvr/session/src/lib.rs`).
+                "preferred_codec": ["variant": codec.alvrVariantName],
             ],
         ]
         if controllerPrediction == .full {
@@ -161,10 +169,11 @@ public enum AlvrStreamConfigEncoder {
 
     public static func framedPacket(settings: AlvrNegotiatedSettings,
                                     wired: Bool = false,
-                                    controllerPrediction: ControllerPrediction = .full)
+                                    controllerPrediction: ControllerPrediction = .full,
+                                    codec: VideoCodec = .h264)
         throws -> Data {
         let payload = try payload(settings: settings, wired: wired,
-                                  controllerPrediction: controllerPrediction)
+                                  controllerPrediction: controllerPrediction, codec: codec)
         guard payload.count <= AlvrControlProbe.maximumPacketBytes else {
             throw BasaltError("ALVR stream configuration is too large")
         }

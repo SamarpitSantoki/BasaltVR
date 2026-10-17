@@ -158,4 +158,22 @@ final class OptionsTests: XCTestCase {
             ["--controller-prediction", "ALVR"])?.controllerPrediction, .alvr)
         XCTAssertThrowsError(try StreamerOptions.parse(["--controller-prediction", "none"]))
     }
+
+    func testCodec() throws {
+        XCTAssertEqual(try StreamerOptions.parse([])?.codec, .h264)
+        XCTAssertEqual(try StreamerOptions.parse(["--codec", "HEVC"])?.codec, .hevc)
+        XCTAssertEqual(try StreamerOptions.parse(["--codec", "h265"])?.codec, .hevc)
+        XCTAssertEqual(try StreamerOptions.parse(["--codec", "h264"])?.codec, .h264)
+        XCTAssertThrowsError(try StreamerOptions.parse(["--codec", "av1"]))
+        XCTAssertThrowsError(try StreamerOptions.parse(["--codec"]))
+        // A profile does not pick the codec until HEVC has a headset A/B.
+        XCTAssertEqual(try StreamerOptions.parse(["--profile", "m3pro"])?.codec, .h264)
+        XCTAssertEqual(try StreamerOptions.parse(
+            ["--codec", "hevc", "--profile", "m3pro"])?.codec, .hevc)
+        // Entropy coding is an H.264 choice.
+        XCTAssertThrowsError(try StreamerOptions.parse(
+            ["--codec", "hevc", "--entropy", "cavlc"]))
+        XCTAssertEqual(try StreamerOptions.parse(
+            ["--codec", "h264", "--entropy", "cavlc"])?.entropyMode, .cavlc)
+    }
 }

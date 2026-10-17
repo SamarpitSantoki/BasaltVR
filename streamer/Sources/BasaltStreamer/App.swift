@@ -42,6 +42,11 @@ struct BasaltStreamerApp {
             AudioLoopbackSelfTest.run(Array(CommandLine.arguments.dropFirst(2)))
             return
         }
+        if CommandLine.arguments.count >= 2,
+           CommandLine.arguments[1] == "encoder-bench" {
+            EncoderBenchmark.run(Array(CommandLine.arguments.dropFirst(2)))
+            return
+        }
 
         let options: StreamerOptions?
         do {
@@ -138,7 +143,7 @@ struct BasaltStreamerApp {
             fputs("server error: \(error.localizedDescription)\n", stderr)
             exit(1)
         }
-        let alvrVideo = AlvrVideoStreamRouter()
+        let alvrVideo = AlvrVideoStreamRouter(codec: options.codec)
         var gameAudio: GameAudioCapture?
         if let audioDeviceName = options.audioDeviceName {
             if options.routeAudioToCaptureDevice {
@@ -159,9 +164,10 @@ struct BasaltStreamerApp {
         let headsetLatencyReporter = HeadsetLatencyReporter()
         let calibrationLogGate = CalibrationLogGate()
         let pipelineStatistics = PipelineStatistics()
-        // Keeps the headset's H.264 reference chain intact: frames are
-        // skipped before encoding while the ALVR transport is busy, and after
-        // any lost access unit only an IDR is sent until one gets through.
+        // Keeps the headset's reference chain intact (H.264 and HEVC alike):
+        // frames are skipped before encoding while the ALVR transport is
+        // busy, and after any lost access unit only an IDR is sent until one
+        // gets through.
         let videoRecovery = VideoLossRecoveryGate(
             clientRequestThrottleNanoseconds: options.wired ? 100_000_000 : 250_000_000,
             recoveryKeyframeMinimumGapNanoseconds: options.wired ? 0 : 250_000_000)
@@ -173,12 +179,13 @@ struct BasaltStreamerApp {
                     + "(\($0) loss(es) so far)"
             }
         }
-        let encoder = try H264Encoder(
+        let encoder = try VideoEncoder(
             width: encodedWidth,
             height: encodedHeight,
             fps: options.fps,
             bitrate: options.megabits * 1_000_000,
             keyframeIntervalSeconds: options.keyframeIntervalSeconds,
+            codec: options.codec,
             entropyMode: options.entropyMode) { annexB, isKeyframe, capturePTS in
                 if !runtimeMode {
                     latencyReporter.recordEncoded(capturePTS: capturePTS)
@@ -465,7 +472,8 @@ struct BasaltStreamerApp {
                     requestedViewHeight: UInt32(negotiateViewHeight),
                     preferredRefreshRate: Float(options.fps),
                     latencyPreset: options.latencyPreset,
-                    controllerPrediction: options.controllerPrediction)
+                    controllerPrediction: options.controllerPrediction,
+                    codec: options.codec)
             }
             let sessionSupervisor = AlvrSessionSupervisor(
                 initialAttemptLimit: wired ? 10 : nil,
@@ -589,7 +597,7 @@ struct BasaltStreamerApp {
         BasaltVR streamer — \(runtimeMode ? "M4 tracked OpenXR source" : "M1 capture") + M2/M6 ALVR media
           \(sourceLine)
           encoding \(encodedWidth)x\(encodedHeight)\(runtimeMode || stereoComposer != nil ? " side-by-side stereo" : "")
-          H.264 High \(options.megabits) Mbps, VideoToolbox low-latency mode
+          \(options.codec == .hevc ? "HEVC Main" : "H.264 High") \(options.megabits) Mbps, VideoToolbox low-latency mode
           listening on tcp://\(options.bindHost):\(server.port ?? options.port)
         """)
         if options.bindIsLoopback {
@@ -602,7 +610,9 @@ struct BasaltStreamerApp {
         } else if options.wired {
             print("  ALVR: USB via adb, TCP control \(AlvrDiscoveryListener.alvrPort)/video \(AlvrVideoStreamSender.defaultPort)")
         }
-        print("  encoder: \(options.entropyMode.rawValue.uppercased()), periodic IDR every "
+        print("  encoder: \(options.codec.displayName)"
+              + (options.codec == .h264 ? " \(options.entropyMode.rawValue.uppercased())" : "")
+              + ", periodic IDR every "
               + "\(options.keyframeIntervalSeconds) s, \(options.fps) fps target, "
               + "\(options.controllerPrediction.rawValue) controller prediction"
               + (options.profile.map { ", profile \($0.rawValue)" } ?? ""))
@@ -619,7 +629,7 @@ struct BasaltStreamerApp {
         print("""
 
         View the stream:
-          ffplay -probesize 32 -analyzeduration 0 -fflags nocache -flags low_delay -framedrop -f h264 tcp://127.0.0.1:\(options.port)
+          ffplay -probesize 32 -analyzeduration 0 -fflags nocache -flags low_delay -framedrop -f \(options.codec.ffmpegFormat) tcp://127.0.0.1:\(options.port)
 
         Ctrl-C to stop.
         """)
@@ -682,10 +692,10 @@ struct BasaltStreamerApp {
             + "StartStream sent, and Quest replied StreamReady.")
         if request.wired {
             print("  ALVR TCP video stream connected through USB at \(request.host):\(request.streamPort); "
-                + "tracking uplink ready; sending H.264 frames.")
+                + "tracking uplink ready; sending \(request.codec.displayName) frames.")
         } else {
             print("  ALVR UDP video stream connected to \(request.host):\(request.streamPort); "
-                + "sending H.264 desktop frames.")
+                + "sending \(request.codec.displayName) desktop frames.")
         }
         return session
     }
@@ -719,7 +729,8 @@ struct BasaltStreamerApp {
                 + "10-bit=\(capabilities.supports10Bit), AV1=\(capabilities.supportsAV1)")
             let negotiated = try requireNegotiatedSettings(handshake.negotiatedSettings)
             print("  prepared stereo desktop preview: \(negotiated.width)x\(negotiated.height) per eye "
-                + "@ \(String(format: "%.0f", negotiated.refreshRate)) Hz, H.264")
+                + "@ \(String(format: "%.0f", negotiated.refreshRate)) Hz, "
+                + options.codec.displayName)
             // The runtime paces xrWaitFrame to the rate the Quest displays,
             // not to the requested --fps, so a 90 Hz headset gets 90 Hz frames.
             if let runtimeLink, runtimeLink.setDisplayRefreshRate(negotiated.refreshRate) {

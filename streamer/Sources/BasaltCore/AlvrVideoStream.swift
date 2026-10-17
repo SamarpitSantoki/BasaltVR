@@ -849,8 +849,13 @@ public final class AlvrVideoStreamRouter: @unchecked Sendable {
     private let lock = NSLock()
     private var sender: AlvrVideoStreamSender?
     private var controlSession: AlvrSessionHandshakeResult?
+    /// The codec of every access unit passed to `send`; it selects the
+    /// parameter-set NAL types and the `DecoderConfig` codec field.
+    public let codec: VideoCodec
 
-    public init() {}
+    public init(codec: VideoCodec = .h264) {
+        self.codec = codec
+    }
 
     public func install(_ sender: AlvrVideoStreamSender,
                         controlSession: AlvrSessionHandshakeResult) {
@@ -916,8 +921,8 @@ public final class AlvrVideoStreamRouter: @unchecked Sendable {
         let sender = self.sender
         let controlSession = self.controlSession
         lock.unlock()
-        if isIDR, let parameterSets = H264ParameterSets.extract(from: annexB) {
-            controlSession?.sendH264DecoderConfig(parameterSets)
+        if isIDR, let parameterSets = VideoParameterSets.extract(from: annexB, codec: codec) {
+            controlSession?.sendDecoderConfig(parameterSets, codec: codec)
         }
         guard let sender else { return true }
         guard let timestamp = suppliedTimestamp ?? sender.timestampForVideoFrame() else {
@@ -939,6 +944,19 @@ public enum H264ParameterSets {
     /// Extracts SPS (type 7) and PPS (type 8) NAL units, preserving Annex-B
     /// start codes for ALVR's MediaCodec initialization buffer.
     public static func extract(from annexB: Data) -> Data? {
+        VideoParameterSets.extract(from: annexB, codec: .h264)
+    }
+}
+
+public enum VideoParameterSets {
+    /// Extracts the parameter-set NAL units of an IDR access unit — SPS and
+    /// PPS (H.264 types 7, 8) or VPS, SPS, and PPS (HEVC types 32, 33, 34) —
+    /// with 4-byte Annex-B start codes, in stream order. This is ALVR's
+    /// `DecoderConfig` buffer: the Quest passes it to MediaCodec as `csd-0`
+    /// (`client_core/src/video_decoder/android.rs`), and the stock server
+    /// sends the same leading VPS+SPS+PPS (H.264: SPS+PPS) NAL units
+    /// (`server_openvr/cpp/alvr_server/NalParsing.cpp`).
+    public static func extract(from annexB: Data, codec: VideoCodec) -> Data? {
         let bytes = [UInt8](annexB)
         var starts = [(offset: Int, codeLength: Int)]()
         var index = 0
@@ -960,8 +978,8 @@ public enum H264ParameterSets {
             let naluStart = start.offset + start.codeLength
             let naluEnd = position + 1 < starts.count ? starts[position + 1].offset : bytes.count
             guard naluStart < naluEnd else { continue }
-            let type = bytes[naluStart] & 0x1F
-            guard type == 7 || type == 8 else { continue }
+            let type = codec.nalUnitType(headerByte: bytes[naluStart])
+            guard codec.parameterSetNALTypes.contains(type) else { continue }
             result.append(contentsOf: [0, 0, 0, 1])
             result.append(contentsOf: bytes[naluStart..<naluEnd])
         }
