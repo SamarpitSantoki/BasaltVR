@@ -43,6 +43,10 @@ final class PipelineStatisticsTests: XCTestCase {
         statistics.recordDrop(.compositorBusy)
         statistics.recordDrop(.network)
         statistics.recordDrop(.network)
+        statistics.recordDrop(.networkBusy)
+        statistics.recordDrop(.awaitingIDR)
+        statistics.recordDrop(.awaitingIDR)
+        statistics.recordDrop(.awaitingIDR)
         statistics.recordPoseAge(nanoseconds: 20 * ms)
         statistics.recordPoseAge(nanoseconds: 30 * ms)
 
@@ -54,6 +58,8 @@ final class PipelineStatisticsTests: XCTestCase {
         XCTAssertEqual(snapshot.encoderBusyDrops, 1)
         XCTAssertEqual(snapshot.compositorBusyDrops, 1)
         XCTAssertEqual(snapshot.networkDrops, 2)
+        XCTAssertEqual(snapshot.networkBusyDrops, 1)
+        XCTAssertEqual(snapshot.awaitingIDRDrops, 3)
         XCTAssertEqual(snapshot.poseAgeAverageMilliseconds, 25)
         XCTAssertEqual(snapshot.poseAgeMaximumMilliseconds, 30)
 
