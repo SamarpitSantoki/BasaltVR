@@ -459,21 +459,12 @@ final class BasaltAppModel: ObservableObject {
             alertMessage = "External bottles are shown read-only. Open this bottle in \(bottle.origin.label), or copy it into Basalt first."
             return
         }
-        let candidates = [
-            bottle.prefix.appendingPathComponent("drive_c/Program Files (x86)/Steam/steam.exe"),
-            bottle.prefix.appendingPathComponent("drive_c/Program Files/Steam/steam.exe"),
-        ]
-        guard let steam = candidates.first(where: {
-            FileManager.default.fileExists(atPath: $0.path)
-        }) else {
-            alertMessage = "Steam is not installed in '\(bottle.name)'."
-            return
-        }
         do {
-            let command = try manager.applicationLaunchCommand(
-                bottleName: managed.name,
-                executable: BottleManager.winePath(for: steam, prefix: bottle.prefix),
-                currentDirectory: steam.deletingLastPathComponent())
+            // Plain steam.exe verifies its files and restores Valve's web
+            // helper, which renders a black window through DXMT. Use the
+            // profile path: install the shim, then launch with Basalt's flags.
+            let command = try manager.steamBootstrapCommand(bottleName: managed.name)
+            try manager.installSteamWebHelperCompatibility(bottleName: managed.name)
             try launchUtility(command, label: "Steam • \(bottle.name)")
         } catch {
             alertMessage = error.localizedDescription

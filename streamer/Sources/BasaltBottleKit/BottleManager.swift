@@ -1131,7 +1131,14 @@ public final class BottleManager: @unchecked Sendable {
     ) throws -> URL? {
         let profile = try loadProfile(name)
         guard profile.source == .steam || profile.source == .bsmanager else { return nil }
-        let bottle = try loadBottle(profile.bottleName)
+        return try installSteamWebHelperCompatibility(bottleName: profile.bottleName)
+    }
+
+    /// The same install for a bottle's Steam client without a launch profile,
+    /// as the Bottles page starts Steam directly.
+    @discardableResult
+    public func installSteamWebHelperCompatibility(bottleName: String) throws -> URL {
+        let bottle = try loadBottle(bottleName)
         let prefix = URL(fileURLWithPath: bottle.prefixPath, isDirectory: true)
         let artifact = repoRoot.appendingPathComponent(
             "runtime/build/bin/steamwebhelper_compat.exe")
@@ -1229,7 +1236,11 @@ public final class BottleManager: @unchecked Sendable {
     public func steamBootstrapCommand(forProfile name: String) throws -> BottleLaunchCommand? {
         let profile = try loadProfile(name)
         guard profile.source == .steam || profile.source == .bsmanager else { return nil }
-        let bottle = try loadBottle(profile.bottleName)
+        return try steamBootstrapCommand(bottleName: profile.bottleName)
+    }
+
+    public func steamBootstrapCommand(bottleName: String) throws -> BottleLaunchCommand {
+        let bottle = try loadBottle(bottleName)
         let prefix = URL(fileURLWithPath: bottle.prefixPath, isDirectory: true)
         let candidates = [
             prefix.appendingPathComponent("drive_c/Program Files (x86)/Steam/steam.exe"),
