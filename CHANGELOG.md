@@ -67,6 +67,11 @@ before each session). The streamer reports a mismatched DLL instead of connectin
 - A live stream-health banner flags a silent headset, a sustained frame rate below target, high
   latency for the selected preset, thermal pressure, and Low Power Mode, with a settings suggestion.
 - The session log can be saved to a file, and every metric sample of a session exported as CSV.
+- **Add Game…** in the Library toolbar makes a launch profile for a Windows game from GOG, itch.io,
+  or any installer, without `basaltctl profile add`. Choose a bottle and the game's `.exe` in its
+  `drive_c`; the name comes from the game folder, itch.io is detected from the path, and the
+  game folder becomes the profile's working directory and `gameRoot`. Profile names now fold
+  accents and drop other non-ASCII letters, so `basaltctl` accepts every name the app creates.
 
 ### Changed
 
