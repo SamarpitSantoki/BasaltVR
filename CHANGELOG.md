@@ -72,9 +72,22 @@ before each session). The streamer reports a mismatched DLL instead of connectin
   `drive_c`; the name comes from the game folder, itch.io is detected from the path, and the
   game folder becomes the profile's working directory and `gameRoot`. Profile names now fold
   accents and drop other non-ASCII letters, so `basaltctl` accepts every name the app creates.
+- **Prepare VR** in the app (Add Game's **Add & Prepare VR**, a game tile's ⋯ menu, and the
+  profile editor): finds whether a game is Half-Life: Alyx, OpenVR, or native OpenXR from its
+  executable's PE imports and Unity plugin folder, asks for a VR mode when unsure, and installs
+  the locally built OpenComposite (plus the OpenVR proxy, the `alyx` preset, and `-vr -dx11` for
+  Alyx). It never downloads OpenComposite and names the build command when a build is missing.
+  It keeps the first original DLL, refuses to replace files it did not write unless asked (then
+  keeps a copy), rolls back on failure, stays inside the bottle without following links, and
+  records hashes in `VRSetup/<profile>.json`. The status is re-checked on every refresh, so a
+  Steam update that restores Valve's DLL shows **VR FILES CHANGED**. **Restore Game Files…**
+  undoes the setup. "Setup ready" only means the files are in place. See `docs/MANAGEMENT.md`.
 
 ### Changed
 
+- `basaltctl opencomposite install` and the profile editor's manual installer (now **Install a
+  DLL by Hand…**) refuse to replace an `opencomposite.ini` that Basalt did not write, and refuse a
+  target, backup, or ini that is a symbolic link.
 - Redesigned management app: lava-tinted native layout with a grouped sidebar (counts, setup
   badge, live session card with Stop), toolbar search and filters, one artwork tile style for
   Steam, BSManager, and profile games with hover-to-play, a Stream hero with the selected game and

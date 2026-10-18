@@ -14,6 +14,20 @@ public struct VRArtifacts: Equatable, Sendable {
     public static let openCompositeBuildCommand = "runtime/scripts/build-opencomposite.zsh"
     public static let proxyBuildCommand = "runtime/scripts/test-openvr-proxy.zsh"
 
+    /// Why setup for `kind` cannot start yet, with the command that fixes it; nil when the
+    /// files it needs exist. Only checks that they exist; Prepare VR validates their contents.
+    public func missingProblem(for kind: VRRuntimeKind,
+                               fileManager: FileManager = .default) -> String? {
+        guard kind != .openXR else { return nil }
+        if !fileManager.fileExists(atPath: openComposite.path) {
+            return "OpenComposite is not built on this Mac yet. Basalt does not download it. Run \(Self.openCompositeBuildCommand) in the BasaltVR folder, then Prepare VR again."
+        }
+        if kind == .alyx, !fileManager.fileExists(atPath: proxy.path) {
+            return "Half-Life: Alyx needs Basalt's OpenVR proxy, which is not built yet. Run \(Self.proxyBuildCommand) in the BasaltVR folder, then Prepare VR again."
+        }
+        return nil
+    }
+
     /// The outputs of `build-opencomposite.zsh` and `test-openvr-proxy.zsh` in `repoRoot`.
     public static func local(repoRoot: URL) -> VRArtifacts {
         VRArtifacts(
@@ -553,9 +567,9 @@ extension BottleManager {
 
     private func loadArtifacts(_ artifacts: VRArtifacts,
                                needsProxy: Bool) throws -> (Data, Data?) {
-        guard fileManager.fileExists(atPath: artifacts.openComposite.path) else {
-            throw BottleToolError(
-                "OpenComposite is not built on this Mac yet. Basalt does not download it. Run \(VRArtifacts.openCompositeBuildCommand) in the BasaltVR folder, then Prepare VR again.")
+        if let problem = artifacts.missingProblem(for: needsProxy ? .alyx : .openVR,
+                                                  fileManager: fileManager) {
+            throw BottleToolError(problem)
         }
         let openComposite = try Data(contentsOf: artifacts.openComposite)
         guard let machine = PEImage.machine(openComposite) else {
@@ -565,10 +579,6 @@ extension BottleManager {
             throw BottleToolError("The local OpenComposite build is \(PEImage.describe(machine: machine)); Basalt needs a 64-bit (x86-64) build.")
         }
         guard needsProxy else { return (openComposite, nil) }
-        guard fileManager.fileExists(atPath: artifacts.proxy.path) else {
-            throw BottleToolError(
-                "Half-Life: Alyx needs Basalt's OpenVR proxy, which is not built yet. Run \(VRArtifacts.proxyBuildCommand) in the BasaltVR folder, then Prepare VR again.")
-        }
         let proxy = try Data(contentsOf: artifacts.proxy)
         guard PEImage.machine(proxy) == machine else {
             throw BottleToolError("The OpenVR proxy at \(artifacts.proxy.path) is not a 64-bit (x86-64) Windows DLL. Build it again with \(VRArtifacts.proxyBuildCommand).")

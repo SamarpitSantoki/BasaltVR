@@ -62,6 +62,7 @@ struct ProfileEditorSheet: View {
     @State private var arguments: String
     @State private var environment: String
     @State private var confirmingDelete = false
+    @State private var preparingVR = false
 
     init(profile: LaunchProfile, model: BasaltAppModel) {
         self.profile = profile
@@ -117,13 +118,21 @@ struct ProfileEditorSheet: View {
 
                 Section {
                     HStack {
-                        Text("Replace the game's openvr_api.dll with a copy of OpenComposite you supply.")
+                        VRStatusLabel(status: model.vrStatuses[profile.name] ?? .notPrepared)
+                        Spacer(minLength: 12)
+                        Button("Prepare VR…") { preparingVR = true }
+                    }
+                    HStack {
+                        Text("Advanced: install an OpenComposite DLL you choose into a folder you choose.")
                             .foregroundStyle(.secondary)
                         Spacer(minLength: 12)
-                        Button("Install…") { installOpenComposite() }
+                        Button("Install a DLL by Hand…") { installOpenComposite() }
                     }
                 } header: {
-                    Text("OpenComposite")
+                    Text("VR Setup")
+                } footer: {
+                    Text("Prepare VR finds the game's VR files and uses your local OpenComposite build. Save other profile changes first: setup can change this profile's arguments.")
+                        .formFooterStyle()
                 }
             }
             .formStyle(.grouped)
@@ -138,6 +147,9 @@ struct ProfileEditorSheet: View {
                 .disabled(executable.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         .frame(width: 640, height: 640)
+        .sheet(isPresented: $preparingVR) {
+            PrepareVRSheet(profile: profile, model: model)
+        }
         .confirmationDialog(
             "Delete '\(profile.name)'?", isPresented: $confirmingDelete,
             titleVisibility: .visible) {
@@ -145,7 +157,9 @@ struct ProfileEditorSheet: View {
                     Task { await model.deleteProfile(profile.name); dismiss() }
                 }
             } message: {
-                Text("The bottle and installed game will not be removed.")
+                Text(model.vrStatuses[profile.name]?.hasRecord == true
+                     ? "The bottle and installed game will not be removed. Basalt's VR files stay in the game folder: use Prepare VR… → Restore Game Files… first to put the original files back."
+                     : "The bottle and installed game will not be removed.")
             }
     }
 
@@ -370,6 +384,9 @@ struct AddGameSheet: View {
     @State private var source = LaunchSource.direct
     @State private var arguments = ""
     @State private var isAdding = false
+    @State private var detection: VRGameDetection?
+    @State private var detectionError: String?
+    @State private var vrMode = VRMode.auto
 
     private var bottle: ManagedBottle? {
         model.bottles.first { $0.name == selectedBottle }
@@ -387,6 +404,22 @@ struct AddGameSheet: View {
 
     private var trimmedName: String {
         name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The game's folder is its root, the same location Prepare VR uses later.
+    private var vrLocation: VRGameLocation? {
+        executable.map { VRGameLocation(executable: $0, folder: $0.deletingLastPathComponent()) }
+    }
+
+    private var vrKind: VRRuntimeKind? { detection?.resolve(vrMode) }
+
+    private var canPrepare: Bool {
+        guard let vrKind, detectionError == nil else { return false }
+        return model.vrArtifacts.missingProblem(for: vrKind) == nil
+    }
+
+    private var canAdd: Bool {
+        bottle != nil && executable != nil && !isOutsideBottle && !trimmedName.isEmpty && !isAdding
     }
 
     var body: some View {
@@ -438,12 +471,10 @@ struct AddGameSheet: View {
                             .formFooterStyle()
                     }
 
-                    Section {
-                        Label("SteamVR games also need OpenComposite: after adding, open Edit Launch Profile… → OpenComposite → Install…. Native OpenXR games don't.",
-                              systemImage: "info.circle")
-                            .fixedSize(horizontal: false, vertical: true)
+                    if executable != nil, !isOutsideBottle {
+                        VRSetupSection(detection: detection, detectionError: detectionError,
+                                       mode: $vrMode, artifacts: model.vrArtifacts)
                     }
-                    .foregroundStyle(.secondary)
                 }
                 .formStyle(.grouped)
                 .disabled(isAdding)
@@ -453,13 +484,15 @@ struct AddGameSheet: View {
             Button("Cancel") { dismiss() }
                 .keyboardShortcut(.cancelAction)
                 .disabled(isAdding)
-            Button("Add Game") { add() }
+            Button("Add Only") { add(prepare: false) }
+                .help("Add the game without changing its files")
+                .disabled(!canAdd)
+            Button(vrKind == .openXR ? "Add Game" : "Add & Prepare VR") { add(prepare: true) }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
-                .disabled(bottle == nil || executable == nil || isOutsideBottle
-                          || trimmedName.isEmpty || isAdding)
+                .disabled(!canAdd || !canPrepare)
         }
-        .frame(width: 600, height: 520)
+        .frame(width: 620, height: 640)
         .interactiveDismissDisabled(isAdding)
         .onAppear {
             if selectedBottle.isEmpty, model.bottles.count == 1 {
@@ -478,19 +511,44 @@ struct AddGameSheet: View {
         executable = url
         name = ManualGame.suggestedName(for: url)
         source = ManualGame.inferredSource(for: url)
+        detection = nil
+        detectionError = nil
+        vrMode = .auto
+        guard let bottle, let location = vrLocation,
+              ManualGame.isInstalled(url, inPrefix: prefix) else { return }
+        Task {
+            switch await model.inspectVR(location, bottleName: bottle.name) {
+            case .success(let found) where executable == url: detection = found
+            case .failure(let error) where executable == url:
+                detectionError = error.localizedDescription
+            default: break
+            }
+        }
     }
 
-    private func add() {
-        guard let bottle, let executable else { return }
+    private func add(prepare: Bool) {
+        guard let bottle, let executable, let location = vrLocation else { return }
         isAdding = true
+        let mode = vrMode
         Task {
-            if await model.createGameProfile(
+            guard let profileName = await model.createGameProfile(
                 named: trimmedName, executable: executable, source: source,
-                arguments: ManualGame.arguments(from: arguments), in: bottle) {
-                dismiss()
-            } else {
+                arguments: ManualGame.arguments(from: arguments), in: bottle) else {
                 isAdding = false
+                return
             }
+            if prepare {
+                switch await model.prepareVR(profileName: profileName, location: location,
+                                             mode: mode) {
+                case .success:
+                    break
+                case .failure(let error as VRCustomFilesError):
+                    model.alertMessage = "Added \(profileName), but VR setup stopped. \(error.localizedDescription) To replace them, open the game's ⋯ menu → Prepare VR…."
+                case .failure(let error):
+                    model.alertMessage = "Added \(profileName), but VR setup did not finish: \(error.localizedDescription)"
+                }
+            }
+            dismiss()
         }
     }
 }

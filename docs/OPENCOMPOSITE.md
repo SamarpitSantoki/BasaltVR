@@ -93,9 +93,14 @@ also name their entry points in `DllImport` attributes.
 
 ## Install
 
+The BasaltVR app's **Prepare VR** does all of this for one game, including Half-Life: Alyx, from
+the two local builds above, with backups, restore, and a status that notices a Steam update; see
+[the management app](MANAGEMENT.md). The command below is the manual path.
+
 `basaltctl opencomposite install` writes OpenComposite (and optionally the proxy) over one game's
 `openvr_api.dll`, below the bottle's prefix, and writes `opencomposite.ini` next to it. The first
-original DLL is kept as `openvr_api.dll.basalt-original`.
+original DLL is kept as `openvr_api.dll.basalt-original`. It refuses to replace an `opencomposite.ini` that
+Basalt did not write, and a target, backup, or ini that is a symbolic link.
 
 | Option | Effect |
 |---|---|
