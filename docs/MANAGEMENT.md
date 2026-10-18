@@ -128,17 +128,61 @@ The Play session and the Stream page's session exclude each other.
    it first with Bottles → ⋯ → Run Windows Installer…). The name comes from the game folder and
    the source (Direct or itch.io) from the path; optional arguments are split on spaces, without
    quotes. The game folder becomes the working directory and `gameRoot`, so a session follows a
-   launcher that starts the real game and exits. SteamVR games still need OpenComposite from the
-   profile editor; native OpenXR games do not. It is the same profile as `basaltctl profile add`.
-4. **Profiles** can edit their source, Windows executable, working directory, arguments, and
-   environment, or be deleted without removing the game. OpenComposite installation is available
-   from the profile editor while keeping the separately supplied DLL inside the managed prefix.
-5. **Play** (from a game tile, or the Stream page's game picker) starts wired or Wi-Fi ALVR with the selected FPS, bitrate, resolution, latency preset,
+   launcher that starts the real game and exits. Once the `.exe` is chosen, the sheet looks for
+   the game's VR files (see **Prepare VR** below) and offers **Add & Prepare VR**; **Add Only**
+   adds the profile without changing any game file. It is the same profile as
+   `basaltctl profile add`.
+4. **Prepare VR…** (a game tile's ⋯ menu, or the profile editor's VR Setup section) sets a game
+   up for Basalt's OpenXR runtime with the same steps Add & Prepare VR uses:
+   - *Detection* is conservative. Half-Life: Alyx is known by `hlvr.exe` or Steam app 546560. A
+     game counts as OpenVR or native OpenXR only when its executable imports `openvr_api.dll` or
+     `openxr_loader.dll` (read from the PE import table), or the DLL is in that Unity player's
+     own `<Game>_Data/Plugins` folder. A DLL that only sits somewhere in the game folder, both
+     kinds at once, or nothing at all makes the result uncertain; then **VR mode** (Auto /
+     Native OpenXR / OpenVR (OpenComposite) / Half-Life: Alyx) must be chosen. The search does
+     not follow symbolic links and stops after 40,000 entries.
+   - *Native OpenXR* changes no game file.
+   - *OpenVR* installs `runtime/build/opencomposite/out/openvr_api.dll` over each `openvr_api.dll`
+     the executable loads (or, when OpenVR was chosen by hand, every `openvr_api.dll` in the game
+     folder) and writes the `default` `opencomposite.ini`.
+   - *Half-Life: Alyx* installs `runtime/build/openvr-proxy/bin/openvr_api.dll` as
+     `game/bin/win64/openvr_api.dll` with OpenComposite beside it as
+     `openvr_api_opencomposite.dll`, writes the `alyx` preset (`initUsingVulkan=false`,
+     `invertUsingShaders=true`), adds `-vr -dx11` to the profile's arguments, and removes
+     `-vulkan` and `hello_xr` test flags (`-g D3D11`, `-ff Hmd`, `-vc Stereo`, `-bm Opaque`).
+   - Basalt uses only these local builds and never downloads OpenComposite. When one is missing,
+     the sheet names the command that builds it (`runtime/scripts/build-opencomposite.zsh`, or
+     `runtime/scripts/test-openvr-proxy.zsh` for the proxy) and Prepare stays disabled. Both must
+     be 64-bit PE DLLs, and a 32-bit game DLL is refused.
+   - The game's first `openvr_api.dll` is kept as `openvr_api.dll.basalt-original` and never
+     replaced by a later setup. Files Basalt did not write (a different `openvr_api.dll` when a
+     backup already exists, a custom `openvr_api_opencomposite.dll`, or an edited
+     `opencomposite.ini`) stop the setup with nothing changed. **Replace and Keep Copies** then
+     saves each as `<name>.basalt-replaced-<UTC time>` before replacing it.
+   - Every target must be inside the bottle's `drive_c` after resolving links, and Basalt does not
+     write through a symbolic link. A failure part-way puts every touched file and the profile
+     back. Repeating Prepare VR is safe; changing the mode or the target folders needs Restore
+     first.
+   - What was installed, with SHA-256 hashes, is recorded in `VRSetup/<profile>.json` in the data
+     folder. The status ("Setup ready … files checked", or "Files changed since setup") is
+     recomputed from the files on every Library refresh, so a Steam update or "Verify integrity
+     of game files" that puts Valve's DLL back shows a **VR FILES CHANGED** chip and a Prepare
+     VR… button beside Play. "Setup ready" means the files are in place, not that the game works;
+     that needs a headset test.
+   - **Restore Game Files…** puts the original DLL back, removes the files Basalt installed and
+     its argument changes, and deletes the record. Files that changed after setup are left alone
+     and listed, and the `.basalt-replaced-…` copies are kept.
+5. **Profiles** can edit their source, Windows executable, working directory, arguments, and
+   environment, or be deleted without removing the game (or Basalt's VR files; restore first).
+   The profile editor keeps the advanced **Install a DLL by Hand…** installer, which writes a
+   chosen DLL inside the managed prefix and refuses to replace an `opencomposite.ini` Basalt did
+   not write.
+6. **Play** (from a game tile, or the Stream page's game picker) starts wired or Wi-Fi ALVR with the selected FPS, bitrate, resolution, latency preset,
    and optional audio input. When audio is enabled, the streamer temporarily routes default
    application output to that loopback and restores the prior output on shutdown. Once the
    authenticated runtime control file exists, the app asks `BasaltBottleKit` for a fully validated
    Wine launch command and owns that child process too.
-6. **Stream** shows the session state, the effective stream settings for the selected game, the
+7. **Stream** shows the session state, the effective stream settings for the selected game, the
    latest Quest FPS, actual wire Mbps, and input-to-display latency with bounded sparkline history
    and average/min/max, and the raw session log (copyable, and clearable between sessions). Stopping the session terminates both children;
    an unexpected streamer exit also terminates the game. While streaming, a health banner explains
@@ -146,13 +190,13 @@ The Play session and the Stream page's session exclude each other.
    above the latency preset's budget, thermal pressure, or Low Power Mode, with a settings
    suggestion for the next session. **Save** writes the log, or every metric sample of the session
    as CSV for comparing runs.
-7. **Recent Sessions** (on the Stream page) records each session's game, settings, streamed
+8. **Recent Sessions** (on the Stream page) records each session's game, settings, streamed
    duration, outcome (ended, stopped, or the failure reason), and whole-session FPS, latency, and
    wire-rate averages, including how often the headset ran below its target. The last 50 sessions
    are kept in `SessionHistory.json` in the data folder; a finished game can be replayed from its row.
-8. **Settings** persists global stream defaults and per-profile overrides, selects audio and
+9. **Settings** persists global stream defaults and per-profile overrides, selects audio and
    USB/Wi-Fi transport, and allows the managed Basalt data directory to be changed from the UI.
-9. **Diagnostic Report** (Settings, or **Help › Diagnostic Report…**) previews a bug-report
+10. **Diagnostic Report** (Settings, or **Help › Diagnostic Report…**) previews a bug-report
    snapshot: app version, commit, and control protocol; Mac model, macOS, and power state; setup
    checks; engines, bottles, and profiles; stream settings; the current and recent sessions; and,
    optionally, the end of the session log. It can be copied as Markdown for a GitHub issue or saved
@@ -195,6 +239,11 @@ It also covers external-bottle metadata, Steam VDF/manifests, artwork, BSManager
 default/configured/explicit-location and managed-bottle launcher/instance discovery, Windows/host
 path mapping, Beat Saber scanning and source inference, duplicate resolution, stream argument
 generation, live-stat parsing, session history persistence and summaries, stream-health rules,
-metric CSV export, diagnostic redaction, and report rendering. `BasaltBottleKitTests` verifies repository/support-root
+metric CSV export, diagnostic redaction, and report rendering. `VRSetupTests` covers VR setup:
+PE import parsing, Alyx/OpenVR/OpenXR/uncertain detection (a nearby DLL alone is not enough,
+links are not followed), the Alyx proxy, preset, and arguments, native OpenXR changing nothing,
+missing builds, 32-bit DLLs, repeat setup keeping the first backup, the status after a Steam-style
+DLL restore, custom-file protection, replacement copies, restore, rollback after a failure
+part-way, and paths or links that leave the bottle. `BasaltBottleKitTests` also verifies repository/support-root
 discovery, maintenance and VR launch commands, the BSManager Steam prerequisite, profile deletion,
 and a real isolated import whose source remains unchanged.
