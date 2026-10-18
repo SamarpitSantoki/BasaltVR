@@ -269,10 +269,20 @@ enum VRMessages {
     }
 
     static func restored(_ report: VRRestoreReport) -> String {
-        var text = "Restored the game's files."
-        if !report.kept.isEmpty {
+        let keptFolders = Set(report.unrestored.map { $0.deletingLastPathComponent().path })
+        let changed = report.kept.filter { !keptFolders.contains($0.deletingLastPathComponent().path) }
+        var text: String
+        if report.isComplete {
+            text = "Restored the game's files."
+        } else {
+            text = "Restore is not complete: the game's original openvr_api.dll is missing, so Basalt kept its setup in "
+                + keptFolders.sorted().joined(separator: ", ")
+                + ". Put the original back as openvr_api.dll.basalt-original, or let Steam verify the game's files, then Restore again."
+            if !report.restored.isEmpty { text += " Other files were restored." }
+        }
+        if !changed.isEmpty {
             text += " Left alone because they changed after setup: "
-                + report.kept.map(\.path).joined(separator: ", ") + "."
+                + changed.map(\.path).joined(separator: ", ") + "."
         }
         return text
     }
