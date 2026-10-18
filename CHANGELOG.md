@@ -150,6 +150,12 @@ before each session). The streamer reports a mismatched DLL instead of connectin
   capturing silence from BlackHole.
 - `basaltctl opencomposite install` no longer writes `enableAudio`, which OpenComposite's `openxr`
   branch rejects.
+- The `hello-xr` profile no longer quits after about 10 s without a frame when started from the
+  app. Khronos hello_xr quits at end of file on stdin, and the game got `/dev/null`. The game now
+  gets an empty pipe as stdin that stays open until it exits (`HeldOpenStandardInput` in
+  BasaltBottleKit, used by app sessions and `basaltctl run`).
+- The streamer prints the Screen Recording hint only after a screen-capture error, not after every
+  fatal error (an adb error got it too).
 - Open BSManager now launches with `start /wait`. A bare `start` exited immediately, and the
   utility exit handler then stopped every Wine process in the bottle, closing BSManager before its
   window appeared.
