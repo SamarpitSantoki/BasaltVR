@@ -124,6 +124,15 @@ before each session). The streamer reports a mismatched DLL instead of connectin
   frame and was not affected. The runtime log prints a `head pose pinning:` line every 5 s: the
   number of frames where a later head query saw a newer sample (these frames had the wrong
   timestamp before this fix).
+- `~/Library/Logs/BasaltVR` no longer grows without end (351 MB in two days). The Quest log
+  starts at the session start (`adb logcat -T 1`) instead of with the old lines in the Quest's
+  buffer (up to 70% of the file), and silences `VideoRenderQualityTracker` (about 1/3 of all
+  lines). `scripts/play.zsh` and the app delete BasaltVR logs older than 7 days at the start of a
+  session (`BASALT_LOG_KEEP_DAYS`; `scripts/log-retention.zsh`, `LogRetention` in
+  BasaltManagerKit). Only regular files with a BasaltVR log name in that folder are deleted.
+- `basaltctl run` flushes the game output before it prints `error: Profile '...' exited with
+  status N`, so the error is on its own line in the game log, not in the middle of the last game
+  line.
 - Stop in the app (Library session, or Bottles → Launch Steam) no longer leaves Wine processes of
   the bottle running (services.exe, explorer.exe, Steam's web helpers) with the Steam window on
   screen. The wineserver could crash while it ended the session, and then `wineserver --kill`

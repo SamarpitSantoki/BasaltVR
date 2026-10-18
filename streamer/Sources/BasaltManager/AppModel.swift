@@ -877,8 +877,9 @@ final class BasaltAppModel: ObservableObject {
 
     private func openSessionLog(named name: String) {
         closeSessionLog()
-        let directory = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/BasaltVR", isDirectory: true)
+        let directory = PlayTools.logsDirectory()
+        // Same 7-day rule as play.zsh (scripts/log-retention.zsh).
+        LogRetention.pruneOldLogs(in: directory)
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyyMMdd-HHmmss"

@@ -310,6 +310,11 @@ private struct BasaltCLI {
             additionalArguments: additional)
         if !result.output.isEmpty { print(result.output, terminator: "") }
         guard result.status == 0 else {
+            // play.zsh sends stdout and stderr to one game log. stdout is buffered, so
+            // flush it first: else the error lands in the middle of the last game line.
+            // utf8.last, not hasSuffix: "\r\n" is one Character in Swift.
+            if let last = result.output.utf8.last, last != UInt8(ascii: "\n") { print() }
+            fflush(stdout)
             throw BottleToolError("Profile '\(profile)' exited with status \(result.status)")
         }
     }
