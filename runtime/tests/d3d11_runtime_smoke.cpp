@@ -1138,6 +1138,95 @@ bool checkInjectedHandSkeleton(
     return true;
 }
 
+// OpenComposite locates one frame several times (projection views, eye
+// transforms, IPD, then the game's WaitGetPoses through xrLocateSpace). Every
+// head query for one predictedDisplayTime must return the sample the first
+// query saw, even after a newer sample arrives, so the frame's tracking
+// timestamp matches the pose the application rendered with. The daemon's
+// 0.875 haptic marker publishes a newer head sample (timestamp 3, 0.25 m
+// higher) and then requires the next FrameReady to keep timestamp 2.
+bool checkPinnedFrameHeadPose(
+    XrSession session,
+    XrSpace localSpace,
+    XrTime displayTime,
+    const XrView (&firstViews)[2],
+    const XrHapticActionInfo& hapticInfo,
+    XrHapticVibration vibration) {
+    vibration.amplitude = 0.875f;
+    XrResult result = xrApplyHapticFeedback(
+        session, &hapticInfo, reinterpret_cast<const XrHapticBaseHeader*>(&vibration));
+
+    XrViewLocateInfo locateInfo{};
+    locateInfo.type = XR_TYPE_VIEW_LOCATE_INFO;
+    locateInfo.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    locateInfo.space = localSpace;
+    XrViewState viewState{};
+    viewState.type = XR_TYPE_VIEW_STATE;
+    XrView views[2]{};
+    views[0].type = XR_TYPE_VIEW;
+    views[1].type = XR_TYPE_VIEW;
+    uint32_t viewCount = 0;
+
+    // A time no xrWaitFrame returned sees the newest sample, so it shows
+    // when the moved head has arrived.
+    locateInfo.displayTime = displayTime + 1;
+    bool moved = false;
+    for (int attempt = 0; XR_SUCCEEDED(result) && !moved && attempt < 100; ++attempt) {
+        result = xrLocateViews(session, &locateInfo, &viewState, 2, &viewCount, views);
+        moved = XR_SUCCEEDED(result) &&
+                nearlyEqual(views[0].pose.position.y,
+                            firstViews[0].pose.position.y + 0.25f, 0.001f);
+        if (!moved) {
+            Sleep(10);
+        }
+    }
+    if (XR_FAILED(result) || !moved) {
+        std::fprintf(stderr, "FAIL: the daemon's newer head sample never arrived (%d)\n",
+                     result);
+        return false;
+    }
+
+    locateInfo.displayTime = displayTime;
+    result = xrLocateViews(session, &locateInfo, &viewState, 2, &viewCount, views);
+    if (XR_FAILED(result) || !nearlyEqual(views[0].pose.position.y,
+                                          firstViews[0].pose.position.y, 0.001f) ||
+        !nearlyEqual(views[1].pose.position.y, firstViews[1].pose.position.y, 0.001f)) {
+        std::fprintf(stderr,
+                     "FAIL: a repeated xrLocateViews for one displayTime returned a newer "
+                     "head sample (%d, eye y %.4f, first %.4f)\n",
+                     result, views[0].pose.position.y, firstViews[0].pose.position.y);
+        return false;
+    }
+
+    XrReferenceSpaceCreateInfo viewSpaceInfo{};
+    viewSpaceInfo.type = XR_TYPE_REFERENCE_SPACE_CREATE_INFO;
+    viewSpaceInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+    viewSpaceInfo.poseInReferenceSpace.orientation.w = 1.0f;
+    XrSpace viewSpace = XR_NULL_HANDLE;
+    result = xrCreateReferenceSpace(session, &viewSpaceInfo, &viewSpace);
+    XrSpaceLocation head{};
+    head.type = XR_TYPE_SPACE_LOCATION;
+    if (XR_SUCCEEDED(result)) {
+        result = xrLocateSpace(viewSpace, localSpace, displayTime, &head);
+    }
+    const float firstHeadY =
+        (firstViews[0].pose.position.y + firstViews[1].pose.position.y) * 0.5f;
+    if (viewSpace != XR_NULL_HANDLE) {
+        xrDestroySpace(viewSpace);
+    }
+    if (XR_FAILED(result) || !nearlyEqual(head.pose.position.y, firstHeadY, 0.001f) ||
+        !nearlyEqual(head.pose.orientation.w, firstViews[0].pose.orientation.w, 0.001f) ||
+        !nearlyEqual(head.pose.orientation.y, firstViews[0].pose.orientation.y, 0.001f)) {
+        std::fprintf(stderr,
+                     "FAIL: xrLocateSpace(VIEW in LOCAL) for the frame's displayTime "
+                     "returned a newer head sample (%d, y %.4f, first %.4f)\n",
+                     result, head.pose.position.y, firstHeadY);
+        return false;
+    }
+    std::puts("PASS: every head query for one displayTime returns the first query's sample");
+    return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -3289,6 +3378,12 @@ int main(int argc, char** argv) {
             projectionViews[index].pose = locatedViews[index].pose;
             projectionViews[index].fov = locatedViews[index].fov;
         }
+    }
+    if (XR_SUCCEEDED(result) && expectInjectedHeadPose() &&
+        !checkPinnedFrameHeadPose(
+            session, localSpace, layerFrameState.predictedDisplayTime,
+            locatedViews, hapticInfo, vibration)) {
+        result = XR_ERROR_VALIDATION_FAILURE;
     }
     frameEndInfo.layerCount = 1;
     frameEndInfo.layers = submittedLayers;

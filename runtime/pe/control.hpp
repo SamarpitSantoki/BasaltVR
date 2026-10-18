@@ -57,11 +57,25 @@ void controlNotePredictedDisplayTime(XrSession session, XrTime predictedDisplayT
 // changeTime. The Quest timestamp is preserved only for ordering because it is
 // not in the runtime's XrTime clock domain. False means disconnected, missing,
 // or stale tracking. A zero locateTime selects the current definition.
+// For a predictedDisplayTime from xrWaitFrame, the first fresh query pins its
+// sample: later queries for that time return the same pose and timestamp.
 bool controlHeadPose(
     XrSession session,
     XrTime locateTime,
     uint64_t* questTimestampNanoseconds,
     XrPosef* poseInLocal);
+
+// The Quest timestamp of the head sample pinned for displayTime, if a head
+// query for that predictedDisplayTime has pinned one.
+bool controlPinnedHeadTimestamp(
+    XrSession session,
+    XrTime displayTime,
+    uint64_t* questTimestampNanoseconds);
+
+// Cumulative diagnostics: frames that pinned a head sample, and frames where
+// a later head query for the same display time would have seen a newer
+// sample without pinning.
+void controlHeadSampleStats(uint64_t* pinnedFrames, uint64_t* divergedFrames);
 
 enum class ControlHand : uint32_t {
     kLeft = 0,
