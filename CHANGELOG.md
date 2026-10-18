@@ -124,6 +124,20 @@ before each session). The streamer reports a mismatched DLL instead of connectin
   frame and was not affected. The runtime log prints a `head pose pinning:` line every 5 s: the
   number of frames where a later head query saw a newer sample (these frames had the wrong
   timestamp before this fix).
+- Stop in the app (Library session, or Bottles → Launch Steam) no longer leaves Wine processes of
+  the bottle running (services.exe, explorer.exe, Steam's web helpers) with the Steam window on
+  screen. The wineserver could crash while it ended the session, and then `wineserver --kill`
+  found nothing. Stop now closes Steam gracefully (`steam.exe -shutdown`), then stops the
+  wineserver, then ends every process that still holds the prefix's files (TERM, then KILL). The
+  next app session, `scripts/steam.zsh stop`, and so `scripts/play.zsh` also clean up such
+  leftovers.
+- The `steam` launch profile no longer ends its session about one second after streaming starts.
+  The app started a Steam prerequisite and then the profile's own steam.exe, which handed over to
+  it and exited. A profile whose executable is steam.exe is now the session's Steam (with the Basalt
+  flags and the runtime control path), and, as in `play.zsh`, a session continues while another
+  program of the game runs after the launched executable exits.
+- App Library and utility sessions save their console to
+  `~/Library/Logs/BasaltVR/app-<profile>-<time>.log`.
 - A slow game (The Lab's Secret Shop) or any hitch over 0.5 s no longer flickers between the game
   image and black.
 - Touch controller poses no longer carry the ALVR client's SteamVR-only grip offset (-15° pitch,

@@ -40,6 +40,53 @@ steam_running() {
     bottle_running && pgrep -f 'Steam\\steam\.exe' >/dev/null 2>&1
 }
 
+# Prints the PID of every Wine process of this bottle, also of those that outlived their
+# wineserver (it can crash while it stops Steam, and then `wineserver --kill` finds
+# nothing). The same rule as WineProcessOwnership in the app: the process holds a file in
+# the prefix's server folder /tmp/.wine-UID/server-DEV-INODE (device and inode of the
+# prefix, in hex), or it holds a file in the prefix and maps this bottle's engine.
+# Spotlight, editors and shells in the prefix never match.
+bottle_pids() {
+    [[ -d $prefix ]] || return 0
+    local -a id
+    id=(${(z)"$(stat -f '%d %i' "$prefix")"})
+    local server_dir
+    server_dir=$(printf '/private/tmp/.wine-%d/server-%x-%x/' $UID ${id[1]} ${id[2]})
+    lsof -n -P -w -F pn -u $UID 2>/dev/null | awk -v sd="$server_dir" -v pf="$prefix/" \
+        -v en="$bottle_dir/engine/" -v self=$$ '
+        /^p/ { pid = substr($0, 2); if (!(pid in seen)) { seen[pid] = 1; order[++n] = pid }; next }
+        /^n/ {
+            name = substr($0, 2) "/"
+            if (index(name, sd) == 1) server[pid] = 1
+            if (index(name, pf) == 1) inprefix[pid] = 1
+            if (index(name, en) == 1) engine[pid] = 1
+        }
+        END {
+            for (i = 1; i <= n; i++) {
+                p = order[i]
+                if (p <= 1 || p == self) continue
+                if ((p in server) || ((p in inprefix) && (p in engine))) print p
+            }
+        }'
+}
+
+# Ends the Wine processes of this bottle that are still there: TERM, then KILL after 2 s.
+kill_leftovers() {
+    local -a pids
+    pids=(${(f)"$(bottle_pids)"})
+    (( ${#pids} )) || return 0
+    print "Ending ${#pids} Wine processes left in bottle '$bottle_name'."
+    kill -TERM $pids 2>/dev/null
+    local i p
+    for i in {1..20}; do
+        for p in $pids; do kill -0 $p 2>/dev/null && break; p=""; done
+        [[ -z $p ]] && return 0
+        sleep 0.1
+    done
+    kill -KILL $pids 2>/dev/null
+    return 0
+}
+
 require_bottle() {
     if [[ ! -x $wine ]]; then
         print -u2 "Bottle '$bottle_name' is not ready. Missing: $wine"
@@ -102,7 +149,12 @@ start_steam() {
 
 stop_steam() {
     if ! bottle_running; then
-        print "Steam is not running."
+        if [[ -n $(bottle_pids) ]]; then
+            kill_leftovers
+            print "Steam is closed."
+        else
+            print "Steam is not running."
+        fi
         return 0
     fi
     mkdir -p "$log_dir"
@@ -141,9 +193,10 @@ stop_steam() {
     fi
     # The wineserver can end a moment before its last child processes do.
     for i in {1..10}; do
-        pgrep -f 'Steam\\steam\.exe|steamwebhelper|winedevice\.exe' >/dev/null 2>&1 || break
+        [[ -n $(bottle_pids) ]] || break
         sleep 0.5
     done
+    kill_leftovers
     print "Steam is closed."
 }
 
