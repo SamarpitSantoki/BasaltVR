@@ -9,7 +9,8 @@
 # What it does: checks the Quest, closes any old Steam in the profile's bottle,
 # starts the streamer (with BlackHole game audio when BlackHole is installed),
 # starts the game, and on Ctrl-C or game exit closes the game, Steam and the
-# streamer cleanly. Logs go to ~/Library/Logs/BasaltVR/.
+# streamer cleanly. Logs go to ~/Library/Logs/BasaltVR/. Logs older than 7 days
+# (BASALT_LOG_KEEP_DAYS) are deleted at the start: scripts/log-retention.zsh.
 #
 # Some games start a second program and exit (The Lab starts Robot Repair). The session
 # ends only when no program from the game's install folder is left in the bottle: see
@@ -38,7 +39,9 @@
 #   --codec h264|hevc   video codec (default: hevc on USB, h264 on Wi-Fi; or set BASALT_CODEC). The flag wins
 #                    over the variable. hevc cannot hold 72 fps at --quality max.
 #   --log-quest      (default) save `adb logcat -v threadtime` from the Quest to
-#                    ~/Library/Logs/BasaltVR/quest-<time>.log while you play
+#                    ~/Library/Logs/BasaltVR/quest-<time>.log while you play. Only
+#                    lines from this session (-T 1), and without the
+#                    VideoRenderQualityTracker spam (about 1/3 of all lines).
 #   --no-log-quest   do not save the Quest log
 #
 # Hidden test flag: --no-adb-check skips the Quest check and runs the streamer
@@ -98,7 +101,7 @@ while (( $# )); do
         --log-quest) log_quest=1 ;;
         --no-log-quest) log_quest=0 ;;
         --no-adb-check) no_adb_check=1 ;;
-        -h|--help) sed -n '2,51p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,54p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) print -u2 "Unknown option: $arg"; exit 2 ;;
         *)
             if [[ -n $profile ]]; then print -u2 "usage: scripts/play.zsh [--wifi|--usb] [--quality normal|high|max] [--codec h264|hevc] [--no-log-quest] <profile>"; exit 2; fi
@@ -124,6 +127,8 @@ if [[ -z $profile ]]; then
 fi
 
 mkdir -p "$log_dir"
+source "$script_dir/log-retention.zsh"
+basalt_prune_logs "$log_dir"
 cd "$repo" || exit 1
 export BASALT_REPO_ROOT=$repo
 play_event start "$profile"
@@ -281,6 +286,11 @@ cleanup_done=0
 readonly run_dir=$QUEST_DATA_DIR/run
 readonly quest_log_max_mb=${BASALT_QUEST_LOG_MAX_MB:-200}
 
+# -T 1: start at the newest line, not with the old lines in the Quest's buffer.
+# VideoRenderQualityTracker:S silences a tag that writes about 1/3 of all lines; every
+# other tag stays at *:V. kill_stale_logcats matches "logcat -v threadtime" (old and new).
+readonly -a logcat_args=(logcat -v threadtime -T 1 '*:V' 'VideoRenderQualityTracker:S')
+
 zmodload zsh/system   # $sysparams[pid]: the pid of a subshell
 proc_command() { /bin/ps -o command= -p "$1" 2>/dev/null; }
 
@@ -314,7 +324,7 @@ start_logcat() {
     local max_bytes=$(( quest_log_max_mb * 1024 * 1024 ))
     (
         trap - EXIT
-        "$QUEST_ADB" -s "$QUEST_SERIAL" logcat -v threadtime >"$quest_log" 2>&1 </dev/null &
+        "$QUEST_ADB" -s "$QUEST_SERIAL" $logcat_args >"$quest_log" 2>&1 </dev/null &
         adb_pid=$!
         trap 'kill -TERM $adb_pid 2>/dev/null; exit 0' TERM INT HUP
         print -r -- $adb_pid >"$logcat_pidfile.adb"

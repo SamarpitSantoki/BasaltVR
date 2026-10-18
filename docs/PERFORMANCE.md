@@ -159,8 +159,10 @@ the Quest.
 Other sources:
 
 - `scripts/play.zsh` saves the Quest's `adb logcat` for the whole session
-  (`~/Library/Logs/BasaltVR/quest-<time>.log`; the Quest itself keeps only about 30 s). MediaCodec
-  errors there mean the Quest could not decode the stream.
+  (`~/Library/Logs/BasaltVR/quest-<time>.log`; the Quest itself keeps only about 30 s). It starts
+  at the session start (`-T 1`) and silences the `VideoRenderQualityTracker` tag. MediaCodec
+  errors there mean the Quest could not decode the stream. Logs older than 7 days are deleted at
+  the next session start (`BASALT_LOG_KEEP_DAYS`).
 - `BASALT_RUNTIME_LOG` and `BASALT_HAPTIC_LOG=1`: see
   [runtime diagnostics](../runtime/README.md#runtime-diagnostics).
 - A/B runs with `hello_xr`: `runtime/scripts/test-khr-hello-xr-headset.zsh` with
