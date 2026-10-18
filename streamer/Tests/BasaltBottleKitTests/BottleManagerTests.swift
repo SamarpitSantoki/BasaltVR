@@ -530,6 +530,21 @@ final class BottleManagerTests: XCTestCase {
         XCTAssertEqual(command.environment["SteamAppId"], "620980")
         XCTAssertEqual(command.environment["SteamGameId"], "620980")
 
+        // The plain Steam client profile is the session's Steam itself, so it
+        // starts with the bootstrap flags (no checksum repair of the web helper
+        // shim) and with this session's runtime control path.
+        try manager.saveProfile(LaunchProfile(
+            name: "steam", bottleName: "Steam", source: .steam,
+            executable: #"C:\Program Files (x86)\Steam\steam.exe"#,
+            arguments: ["-cef-disable-gpu-compositing"]))
+        let client = try manager.profileLaunchCommand("steam", controlFile: control)
+        XCTAssertEqual(client.arguments, [
+            #"C:\Program Files (x86)\Steam\steam.exe"#,
+            "-inhibitbootstrap", "-noverifyfiles", "-no-cef-sandbox",
+            "-cef-disable-gpu-compositing",
+        ])
+        XCTAssertEqual(client.environment["BASALT_CONTROL"], command.environment["BASALT_CONTROL"])
+
         XCTAssertEqual(
             try manager.installSteamWebHelperCompatibility(forProfile: "beat-saber"),
             webHelper)

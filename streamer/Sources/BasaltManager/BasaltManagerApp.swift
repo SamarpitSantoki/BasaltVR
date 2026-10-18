@@ -59,6 +59,7 @@ struct BasaltManagerApp: App {
 @MainActor
 enum PlaySessionTermination {
     static weak var controller: PlayController?
+    static weak var model: BasaltAppModel?
 }
 
 private final class BasaltApplicationDelegate: NSObject, NSApplicationDelegate {
@@ -68,19 +69,25 @@ private final class BasaltApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Quitting during a game first closes the game, Steam, Wine, and the stream
-    /// (play.zsh's own cleanup), then quits.
+    /// (play.zsh's own cleanup, or the Stream page's Stop), then quits.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         MainActor.assumeIsolated {
-            guard let play = PlaySessionTermination.controller, play.isActive else {
-                return .terminateNow
-            }
+            let play = PlaySessionTermination.controller.flatMap { $0.isActive ? $0 : nil }
+            let model = PlaySessionTermination.model.flatMap { $0.hasWineWork ? $0 : nil }
+            guard play != nil || model != nil else { return .terminateNow }
             var replied = false
             let reply = {
                 guard !replied else { return }
                 replied = true
                 NSApplication.shared.reply(toApplicationShouldTerminate: true)
             }
-            play.stop { reply() }
+            var pending = (play == nil ? 0 : 1) + (model == nil ? 0 : 1)
+            let finished = {
+                pending -= 1
+                if pending == 0 { reply() }
+            }
+            play?.stop { finished() }
+            model?.stopForTermination { finished() }
             // play.zsh force-kills after 120 s; never hang the quit longer than that.
             DispatchQueue.main.asyncAfter(deadline: .now() + 130) { reply() }
             return .terminateLater
@@ -137,7 +144,10 @@ private struct RootView: View {
             for: NSApplication.willTerminateNotification)) { _ in
             model.stop()
         }
-        .onAppear { PlaySessionTermination.controller = model.play }
+        .onAppear {
+            PlaySessionTermination.controller = model.play
+            PlaySessionTermination.model = model
+        }
     }
 }
 

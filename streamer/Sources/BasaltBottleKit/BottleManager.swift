@@ -143,6 +143,17 @@ public struct BottleLaunchCommand: Equatable, Sendable {
 public protocol BottleCommandRunning: Sendable {
     func run(executable: URL, arguments: [String], environment: [String: String],
              currentDirectory: URL?) throws -> CommandOutput
+    /// Like `run`, but terminates the command after `timeout` seconds.
+    func run(executable: URL, arguments: [String], environment: [String: String],
+             currentDirectory: URL?, timeout: TimeInterval) throws -> CommandOutput
+}
+
+extension BottleCommandRunning {
+    public func run(executable: URL, arguments: [String], environment: [String: String],
+                    currentDirectory: URL?, timeout: TimeInterval) throws -> CommandOutput {
+        try run(executable: executable, arguments: arguments,
+                environment: environment, currentDirectory: currentDirectory)
+    }
 }
 
 public struct ProcessBottleCommandRunner: BottleCommandRunning {
@@ -151,6 +162,20 @@ public struct ProcessBottleCommandRunner: BottleCommandRunning {
     public func run(executable: URL, arguments: [String],
                     environment: [String: String], currentDirectory: URL?) throws
         -> CommandOutput {
+        try execute(executable: executable, arguments: arguments, environment: environment,
+                    currentDirectory: currentDirectory, timeout: nil)
+    }
+
+    public func run(executable: URL, arguments: [String],
+                    environment: [String: String], currentDirectory: URL?,
+                    timeout: TimeInterval) throws -> CommandOutput {
+        try execute(executable: executable, arguments: arguments, environment: environment,
+                    currentDirectory: currentDirectory, timeout: timeout)
+    }
+
+    private func execute(executable: URL, arguments: [String],
+                         environment: [String: String], currentDirectory: URL?,
+                         timeout: TimeInterval?) throws -> CommandOutput {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
@@ -184,6 +209,13 @@ public struct ProcessBottleCommandRunner: BottleCommandRunning {
             try process.run()
         } catch {
             throw BottleToolError("Could not run \(executable.path): \(error.localizedDescription)")
+        }
+        if let timeout {
+            let deadline = Date().addingTimeInterval(timeout)
+            while process.isRunning && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            if process.isRunning { process.terminate() }
         }
         process.waitUntilExit()
         try? outputHandle.synchronize()
@@ -307,16 +339,19 @@ public final class BottleManager: @unchecked Sendable {
     public let repoRoot: URL
     private let fileManager: FileManager
     private let runner: any BottleCommandRunning
+    private let processControl: any WineProcessControlling
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
     public init(root: URL, repoRoot: URL,
                 fileManager: FileManager = .default,
-                runner: any BottleCommandRunning = ProcessBottleCommandRunner()) {
+                runner: any BottleCommandRunning = ProcessBottleCommandRunner(),
+                processControl: any WineProcessControlling = SystemWineProcessControl()) {
         paths = BasaltManagedPaths(root: root)
         self.repoRoot = repoRoot.standardizedFileURL
         self.fileManager = fileManager
         self.runner = runner
+        self.processControl = processControl
         encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         encoder.dateEncodingStrategy = .iso8601
@@ -994,6 +1029,15 @@ public final class BottleManager: @unchecked Sendable {
             environment["SteamAppId"] = "620980"
             environment["SteamGameId"] = "620980"
         }
+        // A profile that starts the Steam client itself (the `steam` profile,
+        // or `steam.exe -applaunch ID`) is the session's Steam: it needs the
+        // same flags as `steamBootstrapCommand`, or Steam restores Valve's web
+        // helper and its window renders black.
+        if profile.source == .steam,
+           WineProcessOwnership.isSteamClient(windowsExecutable) {
+            let missing = Self.steamClientArguments.filter { !profileArguments.contains($0) }
+            profileArguments = missing + profileArguments
+        }
         environment["DXMT_BASALT_IOSURFACE"] = "1"
         environment["BASALT_CONTROL"] = Self.winePath(for: controlFile,
                                                        prefix: URL(fileURLWithPath: bottle.prefixPath))
@@ -1052,15 +1096,22 @@ public final class BottleManager: @unchecked Sendable {
     /// helpers, and services) to its per-prefix wineserver. Asking that server
     /// to shut down keeps cleanup scoped to this bottle instead of matching
     /// processes system-wide.
+    ///
+    /// The server can die before its clients (it crashed during a Steam
+    /// teardown), and then nothing answers `--kill`, so afterwards every
+    /// process that still holds this prefix's files is terminated directly
+    /// (see `WineProcessOwnership`).
     @discardableResult
     public func terminateBottleProcesses(
         launchedWith command: BottleLaunchCommand
     ) throws -> CommandOutput {
-        guard let prefixPath = command.environment["WINEPREFIX"],
-              !prefixPath.isEmpty else {
-            throw BottleToolError(
-                "Cannot clean up Wine processes without a WINEPREFIX")
-        }
+        try stopWine(launchedWith: command).output
+    }
+
+    private func stopWine(
+        launchedWith command: BottleLaunchCommand
+    ) throws -> (output: CommandOutput, leftovers: [Int32]) {
+        let prefixPath = try Self.prefixPath(of: command)
         let wineserver = command.executable.deletingLastPathComponent()
             .appendingPathComponent("wineserver")
         guard fileManager.isExecutableFile(atPath: wineserver.path) else {
@@ -1070,25 +1121,157 @@ public final class BottleManager: @unchecked Sendable {
         var environment = command.environment
         environment["WINEPREFIX"] = prefixPath
         environment["WINEDEBUG"] = environment["WINEDEBUG"] ?? "-all"
+        // Ask the server first: it ends its clients in order. Only what it
+        // leaves behind is terminated one by one.
         let result = try runner.run(
             executable: wineserver,
             arguments: ["--kill", "--wait"],
             environment: environment,
             currentDirectory: nil)
+        let leftovers = terminateLeftoverWineProcesses(launchedWith: command)
         let detail = result.trimmedOutput
         if result.status == 0 {
-            return result
+            return (result, leftovers)
         }
         // Wine returns status 1 with no diagnostic when --kill finds no
         // wineserver for the prefix. That is already the desired clean state,
         // not a launch-blocking failure. Preserve nonempty diagnostics and all
         // other statuses as real errors.
         if result.status == 1 && detail.isEmpty {
-            return CommandOutput(status: 0, output: "")
+            return (CommandOutput(status: 0, output: ""), leftovers)
         }
         throw BottleToolError(
             "Could not stop Wine processes for \(prefixPath)"
                 + (detail.isEmpty ? "" : ": \(detail)"))
+    }
+
+    /// Closes Steam the way `scripts/steam.zsh stop` does, then stops all
+    /// Wine processes of the prefix. A Steam that is killed instead logs
+    /// "didn't shutdown cleanly" at its next start and may lose state.
+    public func shutDownBottle(
+        launchedWith command: BottleLaunchCommand,
+        steamTimeout: TimeInterval = 20, serverPatience: TimeInterval = 30
+    ) throws -> BottleShutdownReport {
+        var report = BottleShutdownReport()
+        report.steamClosedGracefully = try closeSteam(
+            launchedWith: command, timeout: steamTimeout, patience: serverPatience)
+        report.leftoverProcessIDs = try stopWine(launchedWith: command).leftovers
+        return report
+    }
+
+    @discardableResult
+    public func shutDownBottle(forProfile profileName: String) throws -> BottleShutdownReport {
+        try shutDownBottle(launchedWith: prefixCommand(forProfile: profileName))
+    }
+
+    /// Runs `steam.exe -shutdown` when Steam runs in the prefix, and waits up to
+    /// `patience` seconds for the prefix's wineserver to end (Wine stops its
+    /// services by itself once the last program has closed). Returns true when
+    /// it did.
+    public func closeSteam(
+        launchedWith command: BottleLaunchCommand,
+        timeout: TimeInterval = 20, patience: TimeInterval = 30
+    ) throws -> Bool {
+        let prefixPath = try Self.prefixPath(of: command)
+        let prefix = URL(fileURLWithPath: prefixPath, isDirectory: true)
+        let servers = WineProcessOwnership.serverDirectories(prefix: prefix)
+        guard servers.contains(where: { processControl.isServerRunning(serverDirectory: $0) }),
+              !bottleProcessCommands(launchedWith: command,
+                                     where: WineProcessOwnership.isSteamClient).isEmpty
+        else { return false }
+        let steam = [
+            prefix.appendingPathComponent("drive_c/Program Files (x86)/Steam/steam.exe"),
+            prefix.appendingPathComponent("drive_c/Program Files/Steam/steam.exe"),
+        ].first { fileManager.fileExists(atPath: $0.path) }
+        guard let steam else { return false }
+        var environment = command.environment
+        environment["WINEPREFIX"] = prefixPath
+        environment["WINEDEBUG"] = environment["WINEDEBUG"] ?? "-all"
+        // The running client receives the request and this invocation exits.
+        // A stuck Steam must not hang the caller, hence the timeout.
+        _ = try runner.run(
+            executable: command.executable,
+            arguments: [Self.winePath(for: steam, prefix: prefix), "-shutdown"],
+            environment: environment,
+            currentDirectory: steam.deletingLastPathComponent(),
+            timeout: timeout)
+        let deadline = Date().addingTimeInterval(patience)
+        while servers.contains(where: { processControl.isServerRunning(serverDirectory: $0) }) {
+            guard Date() < deadline else { return false }
+            processControl.pause(0.5)
+        }
+        return true
+    }
+
+    /// Command lines of the prefix's running Wine processes that satisfy
+    /// `include`. The command-line test runs first and is cheap, so only the
+    /// few candidates are checked for ownership.
+    public func bottleProcessCommands(
+        launchedWith command: BottleLaunchCommand,
+        where include: (String) -> Bool
+    ) -> [String] {
+        guard let prefixPath = command.environment["WINEPREFIX"], !prefixPath.isEmpty else {
+            return []
+        }
+        let candidates = processControl.commandLines()
+            .filter { $0.key != getpid() && include($0.value) }
+        guard !candidates.isEmpty else { return [] }
+        let owned = ownedProcessIDs(
+            prefixPath: prefixPath, command: command,
+            lsofOutput: processControl.openFiles(processIDs: candidates.keys.sorted()))
+        return owned.compactMap { candidates[$0] }
+    }
+
+    /// Terminates the prefix's Wine processes that outlived their wineserver:
+    /// SIGTERM, then SIGKILL for any still running after a short wait.
+    /// Returns the process IDs it signalled.
+    @discardableResult
+    public func terminateLeftoverWineProcesses(
+        launchedWith command: BottleLaunchCommand
+    ) -> [Int32] {
+        guard let prefixPath = command.environment["WINEPREFIX"], !prefixPath.isEmpty else {
+            return []
+        }
+        let leftovers = ownedProcessIDs(
+            prefixPath: prefixPath, command: command,
+            lsofOutput: processControl.openFiles(processIDs: nil))
+        guard !leftovers.isEmpty else { return [] }
+        leftovers.forEach { processControl.send(SIGTERM, to: $0) }
+        var running = leftovers
+        for _ in 0..<40 {
+            running = running.filter(processControl.isRunning)
+            if running.isEmpty { return leftovers }
+            processControl.pause(0.05)
+        }
+        running.forEach { processControl.send(SIGKILL, to: $0) }
+        for _ in 0..<20 {
+            running = running.filter(processControl.isRunning)
+            if running.isEmpty { break }
+            processControl.pause(0.05)
+        }
+        return leftovers
+    }
+
+    private func ownedProcessIDs(
+        prefixPath: String, command: BottleLaunchCommand, lsofOutput: String
+    ) -> [Int32] {
+        let prefix = URL(fileURLWithPath: prefixPath, isDirectory: true)
+        // .../engine/bin/wine → .../engine: the loader and its libraries.
+        let engineRoot = command.executable.deletingLastPathComponent()
+            .deletingLastPathComponent().path
+        return WineProcessOwnership.processIDs(
+            lsofOutput: lsofOutput, prefix: prefix.path, engineRoot: engineRoot,
+            serverDirectories: WineProcessOwnership.serverDirectories(prefix: prefix),
+            excluding: [getpid()])
+    }
+
+    private static func prefixPath(of command: BottleLaunchCommand) throws -> String {
+        guard let prefixPath = command.environment["WINEPREFIX"],
+              !prefixPath.isEmpty else {
+            throw BottleToolError(
+                "Cannot clean up Wine processes without a WINEPREFIX")
+        }
+        return prefixPath
     }
 
     /// Resolves a normal Wine application without requiring an active VR
@@ -1261,11 +1444,14 @@ public final class BottleManager: @unchecked Sendable {
             // a client update from replacing the shim and immediately relaunching
             // a black helper. Steam can still be updated outside a Basalt session;
             // the next compatibility install preserves that newer helper.
-            arguments: [
-                "-inhibitbootstrap", "-noverifyfiles", "-no-cef-sandbox",
-            ],
+            arguments: Self.steamClientArguments,
             currentDirectory: steam.deletingLastPathComponent())
     }
+
+    /// Flags for every Steam client Basalt starts; see `steamBootstrapCommand`.
+    public static let steamClientArguments = [
+        "-inhibitbootstrap", "-noverifyfiles", "-no-cef-sandbox",
+    ]
 
     public func steamConnectionLogURL(forProfile name: String) throws -> URL? {
         let profile = try loadProfile(name)

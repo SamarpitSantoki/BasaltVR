@@ -126,6 +126,17 @@ final class BasaltAppModel: ObservableObject {
     private var activeLaunchID: UUID?
     /// The session `launch` started; `finishSession` records it to history.
     private var openSession: SessionRecord?
+    /// Follows a game's other programs after the launched executable exits.
+    private var followTask: Task<Void, Never>?
+    /// Steam, Wine, and the bottle's services closing after Stop (this can
+    /// take half a minute). The next launch waits for it, so two cleanups
+    /// never run in one prefix at the same time.
+    private var wineShutdown: Task<Void, Never>?
+    private var wineShutdownID: UUID?
+    /// The launched program is the Steam client; Stop closes it gracefully.
+    private var gameIsSteamClient = false
+    /// The session console, also saved to ~/Library/Logs/BasaltVR.
+    private var sessionLog: FileHandle?
     private var hasChosenInitialSection = false
     private static let streamSettingsKey = "BasaltVR.streamSettings.v1"
     private static let preferredProfileKey = "BasaltVR.preferredProfile"
@@ -573,16 +584,28 @@ final class BasaltAppModel: ObservableObject {
             preferredProfileName = profileName
             sessionState = .starting(profile: profileName)
             selection = .stream
-            console.restart(with: "Preparing \(profileName)…\n")
+            if let wineShutdown {
+                appendLog("Waiting for the last session's Steam and Wine to close…\n")
+                await wineShutdown.value
+                try ensureCurrent()
+            }
+            console.restart(with: "")
+            openSessionLog(named: profileName)
+            appendLog("Preparing \(profileName)…\n")
             openSession = SessionRecord(profileName: profileName, settings: launchSettings)
+            let profile = try manager.loadProfile(profileName)
 
+            // As play.zsh does: close a Steam that already runs in the bottle
+            // (a game started from it would inherit its old environment), and
+            // end Wine processes left over from an earlier session.
             appendLog("Stopping stale Wine processes in this bottle…\n")
             let manager = manager
             // A failure thrown after Stop is swallowed by the catch below.
-            try await Task.detached {
-                _ = try manager.terminateBottleProcesses(forProfile: profileName)
+            let staleReport = try await Task.detached {
+                try manager.shutDownBottle(forProfile: profileName)
             }.value
             try ensureCurrent()
+            logShutdown(staleReport)
             appendLog("Bottle process state is clean\n")
 
             // Keep the bottle-side DLL in lockstep with the streamer build.
@@ -601,7 +624,10 @@ final class BasaltAppModel: ObservableObject {
 
             _ = try manager.installSteamWebHelperCompatibility(
                 forProfile: profileName)
-            if let steamCommand = try manager.steamBootstrapCommand(
+            // A profile whose executable is steam.exe is the session's Steam:
+            // a prerequisite Steam would make it hand over and exit at once.
+            if SteamSessionPlan.startsSteamFirst(profile),
+               let steamCommand = try manager.steamBootstrapCommand(
                 forProfile: profileName) {
                 let connectionLog = try manager.steamConnectionLogURL(
                     forProfile: profileName)
@@ -700,17 +726,20 @@ final class BasaltAppModel: ObservableObject {
             command.environment.forEach { environment[$0.key] = $0.value }
             game.environment = environment
             attachOutput(of: game, prefix: "game: ")
+            let matcher = command.arguments.first.flatMap {
+                GameProcessMatcher(profile: profile, launchedExecutable: $0)
+            }
             game.terminationHandler = { [weak self] game in
                 Task { @MainActor in
                     guard let self, self.gameProcess === game else { return }
                     self.appendLog("Game exited with status \(game.terminationStatus)\n")
                     self.gameProcess = nil
-                    self.finishSession(.ended)
-                    self.stop()
+                    self.followGame(matcher, launchedWith: command)
                 }
             }
             try game.run()
             gameProcess = game
+            gameIsSteamClient = SteamSessionPlan.launchesSteamClient(profile)
             activeWineCommand = command
             activeLaunchID = nil
             openSession?.streamingStartedAt = Date()
@@ -730,30 +759,140 @@ final class BasaltAppModel: ObservableObject {
 
     func stop() {
         activeLaunchID = nil
+        followTask?.cancel()
+        followTask = nil
         finishSession(.stopped)
         let game = gameProcess
         let steam = steamProcess
         let streamer = streamerProcess
         let wineCommand = activeWineCommand
+        let gameIsSteam = gameIsSteamClient
         gameProcess = nil
         steamProcess = nil
         streamerProcess = nil
         activeWineCommand = nil
+        gameIsSteamClient = false
 
-        if let game, game.isRunning { game.terminate() }
-        if let steam, steam.isRunning { steam.terminate() }
-        if let wineCommand {
-            do {
-                try manager.terminateBottleProcesses(launchedWith: wineCommand)
-                appendLog("Stopped Wine processes for this session\n")
-            } catch {
-                appendLog("Wine cleanup failed: \(error.localizedDescription)\n")
-            }
-        }
+        // Steam is not killed: shutDownBottle asks it to close (steam.exe
+        // -shutdown) first. A killed Steam logs "didn't shutdown cleanly" at
+        // its next start.
+        if let game, game.isRunning, !gameIsSteam || wineCommand == nil { game.terminate() }
         if let streamer, streamer.isRunning { streamer.terminate() }
         if let controlFile { try? FileManager.default.removeItem(at: controlFile) }
         controlFile = nil
         if sessionState.isActive { sessionState = .stopped }
+        guard let wineCommand else {
+            if let steam, steam.isRunning { steam.terminate() }
+            closeSessionLog()
+            return
+        }
+
+        appendLog("Closing Steam and Wine in this bottle…\n")
+        let manager = manager
+        let previous = wineShutdown
+        let shutdownID = UUID()
+        wineShutdownID = shutdownID
+        wineShutdown = Task { [weak self] in
+            await previous?.value
+            let result = await Task.detached {
+                Result { try manager.shutDownBottle(launchedWith: wineCommand) }
+            }.value
+            // Normally gone with the bottle; never leave them behind.
+            for process in [game, steam].compactMap({ $0 }) where process.isRunning {
+                process.terminate()
+            }
+            guard let self else { return }
+            switch result {
+            case .success(let report):
+                self.logShutdown(report)
+                self.appendLog("Stopped Wine processes for this session\n")
+            case .failure(let error):
+                self.appendLog("Wine cleanup failed: \(error.localizedDescription)\n")
+            }
+            guard self.wineShutdownID == shutdownID else { return }
+            self.wineShutdown = nil
+            self.wineShutdownID = nil
+            self.closeSessionLog()
+        }
+    }
+
+    /// True while a session runs or its Steam and Wine are still closing.
+    var hasWineWork: Bool { sessionState.isActive || wineShutdown != nil }
+
+    /// Stops the session and calls `completion` once Steam and Wine are closed.
+    func stopForTermination(completion: @escaping @MainActor () -> Void) {
+        stop()
+        guard let wineShutdown else { return completion() }
+        Task {
+            await wineShutdown.value
+            completion()
+        }
+    }
+
+    private func logShutdown(_ report: BottleShutdownReport) {
+        if report.steamClosedGracefully { appendLog("Steam closed\n") }
+        if !report.leftoverProcessIDs.isEmpty {
+            appendLog("Ended \(report.leftoverProcessIDs.count) Wine processes that outlived their wineserver\n")
+        }
+    }
+
+    /// The launched executable exited. Like play.zsh, keep the session while
+    /// another program of the game runs (The Lab starts Robot Repair and
+    /// exits; Steam can hand over to another steam.exe), then end it.
+    private func followGame(_ matcher: GameProcessMatcher?, launchedWith command: BottleLaunchCommand) {
+        guard let matcher else {
+            finishSession(.ended)
+            stop()
+            return
+        }
+        let manager = manager
+        followTask = Task { [weak self] in
+            var follower = GameProcessFollower()
+            while !Task.isCancelled {
+                let found = await Task.detached {
+                    manager.bottleProcessCommands(launchedWith: command) {
+                        matcher.match($0) != nil
+                    }.compactMap(matcher.match)
+                }.value
+                guard let self, !Task.isCancelled else { return }
+                switch follower.observe(found) {
+                case .waiting, .running:
+                    break
+                case .started(let program):
+                    if matcher.kind == .steamClient {
+                        self.appendLog("Steam is still running. Press Stop to end the session.\n")
+                    } else {
+                        self.appendLog("\(matcher.name) started \(program); still running.\n")
+                    }
+                case .ended:
+                    self.followTask = nil
+                    self.finishSession(.ended)
+                    self.stop()
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
+    }
+
+    private func openSessionLog(named name: String) {
+        closeSessionLog()
+        let directory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/BasaltVR", isDirectory: true)
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let file = directory.appendingPathComponent(
+            "app-\(sanitizedProfileName(name))-\(formatter.string(from: Date())).log")
+        try? FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        guard FileManager.default.createFile(atPath: file.path, contents: nil) else { return }
+        sessionLog = try? FileHandle(forWritingTo: file)
+    }
+
+    private func closeSessionLog() {
+        try? sessionLog?.close()
+        sessionLog = nil
     }
 
     private func waitForSteam(
@@ -879,6 +1018,10 @@ final class BasaltAppModel: ObservableObject {
         guard !sessionState.isActive, !play.isActive else {
             throw BottleToolError("Stop the current Wine or VR session first")
         }
+        guard wineShutdown == nil else {
+            throw BottleToolError(
+                "Steam and Wine are still closing after the last session. Try again in a few seconds.")
+        }
         let process = Process()
         process.executableURL = command.executable
         process.arguments = command.arguments
@@ -904,8 +1047,11 @@ final class BasaltAppModel: ObservableObject {
         try process.run()
         gameProcess = process
         activeWineCommand = command
+        gameIsSteamClient = command.arguments.first.map(WineProcessOwnership.isSteamClient) ?? false
         sessionState = .utility(label)
-        console.restart(with: "Launching \(label)…\n", clearingSamples: false)
+        console.restart(with: "", clearingSamples: false)
+        openSessionLog(named: label)
+        appendLog("Launching \(label)…\n")
         selection = .stream
     }
 
@@ -969,6 +1115,7 @@ final class BasaltAppModel: ObservableObject {
     }
 
     private func appendLog(_ value: String) {
+        if let sessionLog { try? sessionLog.write(contentsOf: Data(value.utf8)) }
         for line in console.append(value) {
             if let metric = StreamLogMetricsParser.parse(line: line) {
                 console.record(metric)
