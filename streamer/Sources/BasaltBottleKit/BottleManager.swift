@@ -258,6 +258,14 @@ public struct BasaltManagedPaths: Sendable {
         try bottleDirectory(name).appendingPathComponent("bottle.json")
     }
 
+    /// Records of the VR files Basalt installed for each launch profile.
+    public var vrSetups: URL { root.appendingPathComponent("VRSetup", isDirectory: true) }
+
+    public func vrSetupFile(_ name: String) throws -> URL {
+        let safeName = try BottleName.validate(name, kind: "profile name")
+        return vrSetups.appendingPathComponent(safeName).appendingPathExtension("json")
+    }
+
     public func profileFile(_ name: String) throws -> URL {
         let safeName = try BottleName.validate(name, kind: "profile name")
         return profiles.appendingPathComponent(safeName).appendingPathExtension("json")
@@ -338,10 +346,10 @@ public enum BottleEngineDiscovery {
 public final class BottleManager: @unchecked Sendable {
     public let paths: BasaltManagedPaths
     public let repoRoot: URL
-    private let fileManager: FileManager
+    let fileManager: FileManager
     private let runner: any BottleCommandRunning
-    private let encoder: JSONEncoder
-    private let decoder: JSONDecoder
+    let encoder: JSONEncoder
+    let decoder: JSONDecoder
 
     public init(root: URL, repoRoot: URL,
                 fileManager: FileManager = .default,
@@ -935,6 +943,17 @@ public final class BottleManager: @unchecked Sendable {
             throw BottleToolError(
                 "OpenComposite target resolves outside the managed bottle prefix")
         }
+        let ini = target.deletingLastPathComponent()
+            .appendingPathComponent(Self.openCompositeININame)
+        for url in [target, ini, target.appendingPathExtension(Self.originalSuffix)]
+        where isSymbolicLink(url) {
+            throw BottleToolError("\(url.path) is a symbolic link. Basalt will not write through it.")
+        }
+        if let current = try? String(contentsOf: ini, encoding: .utf8),
+           !current.hasPrefix(OpenCompositeConfiguration.managedHeader) {
+            throw BottleToolError(
+                "\(ini.path) was not written by Basalt. Move it away to use Basalt's configuration.")
+        }
         if fileManager.fileExists(atPath: target.path) {
             let backup = target.appendingPathExtension("basalt-original")
             if !fileManager.fileExists(atPath: backup.path) {
@@ -955,10 +974,7 @@ public final class BottleManager: @unchecked Sendable {
                 try fileManager.removeItem(at: proxied)
             }
         }
-        try configuration.iniText.write(
-            to: target.deletingLastPathComponent()
-                .appendingPathComponent("opencomposite.ini"),
-            atomically: true, encoding: .utf8)
+        try configuration.iniText.write(to: ini, atomically: true, encoding: .utf8)
         return target
     }
 

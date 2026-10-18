@@ -46,6 +46,10 @@ public struct OpenCompositeConfiguration: Equatable, Sendable {
         "true", "on", "enabled", "false", "off", "disabled",
     ]
 
+    /// The first line of every `opencomposite.ini` Basalt writes.
+    public static let managedHeader =
+        "; Managed by BasaltVR. OpenComposite remains a separately built GPLv3 artifact."
+
     public private(set) var options: [Option] = []
 
     public static let standard = OpenCompositeConfiguration(preset: .standard)
@@ -92,7 +96,7 @@ public struct OpenCompositeConfiguration: Equatable, Sendable {
     }
 
     public var iniText: String {
-        var lines = ["; Managed by BasaltVR. OpenComposite remains a separately built GPLv3 artifact."]
+        var lines = [Self.managedHeader]
         lines += options.map { "\($0.key)=\($0.value)" }
         return lines.joined(separator: "\n") + "\n"
     }
