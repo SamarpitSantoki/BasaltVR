@@ -601,6 +601,70 @@ final class BottleManagerTests: XCTestCase {
                 "drive_c/Program Files (x86)/Steam/logs/connection_log.txt"))
     }
 
+    func testBottleSteamLaunchInstallsShimAndUsesBasaltFlags() throws {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "BasaltBottleSteam-\(UUID().uuidString)", isDirectory: true)
+        let root = temporary.appendingPathComponent("data", isDirectory: true)
+        let directory = root.appendingPathComponent("Bottles/Steam", isDirectory: true)
+        let prefix = directory.appendingPathComponent("prefix", isDirectory: true)
+        let engineRoot = directory.appendingPathComponent("engine", isDirectory: true)
+        let wine = engineRoot.appendingPathComponent("bin/wine")
+        let steam = prefix.appendingPathComponent(
+            "drive_c/Program Files (x86)/Steam/steam.exe")
+        let webHelper = prefix.appendingPathComponent(
+            "drive_c/Program Files (x86)/Steam/bin/cef/cef.win64/steamwebhelper.exe")
+        let compatibilityArtifact = temporary.appendingPathComponent(
+            "runtime/build/bin/steamwebhelper_compat.exe")
+        for url in [wine, webHelper, compatibilityArtifact] {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        }
+        try Data("#!/bin/sh\n".utf8).write(to: wine)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: wine.path)
+        try Data([0x4d, 0x5a]).write(to: steam)
+        let originalHelper = Data([0x4d, 0x5a, 0x10])
+        var compatibilityShim = Data([0x4d, 0x5a, 0x20])
+        for unit in "steamwebhelper.basalt-original.exe".utf16 {
+            compatibilityShim.append(UInt8(unit & 0xff))
+            compatibilityShim.append(UInt8(unit >> 8))
+        }
+        try originalHelper.write(to: webHelper)
+        try compatibilityShim.write(to: compatibilityArtifact)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let engine = BottleEngine(
+            id: "test-pinned", kind: .pinned, wineBinary: wine,
+            wineserverBinary: engineRoot.appendingPathComponent("bin/wineserver"),
+            root: engineRoot, supportsBasaltDXMT: true)
+        let bottle = ManagedBottle(
+            name: "Steam", engine: engine, prefix: prefix,
+            engineRoot: engineRoot, wineBinary: wine)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(bottle).write(to: directory.appendingPathComponent("bottle.json"))
+        let manager = BottleManager(root: root, repoRoot: temporary)
+
+        // The Bottles page starts Steam without a launch profile. It must take
+        // the same path as a profile launch: shim first, then the Basalt flags.
+        XCTAssertEqual(
+            try manager.installSteamWebHelperCompatibility(bottleName: "Steam"),
+            webHelper)
+        XCTAssertEqual(try Data(contentsOf: webHelper), compatibilityShim)
+        XCTAssertEqual(
+            try Data(contentsOf: webHelper.deletingPathExtension()
+                .appendingPathExtension("basalt-original.exe")),
+            originalHelper)
+
+        let bootstrap = try manager.steamBootstrapCommand(bottleName: "Steam")
+        XCTAssertEqual(bootstrap.executable, wine.standardizedFileURL)
+        XCTAssertEqual(bootstrap.arguments, [
+            #"C:\Program Files (x86)\Steam\steam.exe"#,
+            "-inhibitbootstrap", "-noverifyfiles", "-no-cef-sandbox",
+        ])
+        XCTAssertEqual(bootstrap.currentDirectory, steam.deletingLastPathComponent())
+    }
+
     func testImportsExternalPrefixIntoIsolatedManagedCopy() throws {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(
             "BasaltImport-\(UUID().uuidString)", isDirectory: true)
