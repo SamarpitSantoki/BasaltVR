@@ -56,7 +56,7 @@ case $1 in
     logcat)
         # A long-running log: remember the pid so the test can check it was stopped.
         print $$ >"$FAKE_LOG.logcat_pid"
-        # It runs until killed (like the real one), and has "logcat -v threadtime" in its command.
+        # It runs until killed (like the real one), and has "logcat -v threadtime -T" in its command.
         print "fake logcat line"
         if [[ -n ${FAKE_LOGCAT_BYTES:-} ]]; then
             while :; do head -c 65536 /dev/zero | tr '\0' x || exit 0; sleep 0.01; done
@@ -221,7 +221,8 @@ expect "quest-wireless status exits 0" "0" "$?"
 # headset, no real streamer, no real /tmp/basalt-control).
 # ---------------------------------------------------------------------------
 mkdir -p "$work/scripts" "$work/fakebin"
-cp "$script_dir/play.zsh" "$script_dir/quest-adb.zsh" "$script_dir/game-processes.zsh" "$work/scripts/"
+cp "$script_dir/play.zsh" "$script_dir/quest-adb.zsh" "$script_dir/game-processes.zsh" \
+    "$script_dir/log-retention.zsh" "$work/scripts/"
 print -r -- $'#!/bin/zsh\nexit 0' >"$work/scripts/steam.zsh"
 # Fake pgrep: no other streamer is running. The Steam web helper is "up". The bottle's
 # wineserver is up only when FAKE_BOTTLE_UP=1.
@@ -286,7 +287,8 @@ FAKE
 chmod +x "$work/scripts/steam.zsh" "$work/bin/pgrep" "$work/fakebin/basalt-streamer" "$work/fakebin/basaltctl"
 
 run_play() {
-    rm -rf "$work/home"; mkdir -p "$work/home"
+    (( ${KEEP_HOME:-0} )) || rm -rf "$work/home"
+    mkdir -p "$work/home"
     : >"$FAKE_LOG"; : >"$work/streamer.log"; rm -f "$FAKE_LOG.logcat_pid"
     HOME=$work/home BASALT_PLAY_CONTROL=$work/control BASALT_BIN_DIR=$work/fakebin \
         BASALT_ALVR_STOP_WAIT=0 BASALT_ALVR_START_WAIT=0 FAKE_STREAMER_LOG=$work/streamer.log \
@@ -301,7 +303,7 @@ logcat_stopped() {
 count_in() { grep -c -- "$1" "$2"; }   # prints the number of matching lines
 export FAKE_DEVICES="$usb_line"$'\n'"$tcp_line"
 export FAKE_STREAMER_FAIL_N=0
-allowed_calls='^adb (devices -l|-s QUEST3SERIAL01 (shell (pm list packages|am force-stop alvr\.client\.stable|monkey -p alvr\.client\.stable -c android\.intent\.category\.LAUNCHER 1)|logcat -v threadtime))$'
+allowed_calls='^adb (devices -l|-s QUEST3SERIAL01 (shell (pm list packages|am force-stop alvr\.client\.stable|monkey -p alvr\.client\.stable -c android\.intent\.category\.LAUNCHER 1)|logcat -v threadtime -T 1 \*:V VideoRenderQualityTracker:S))$'
 
 # Normal start: one clean ALVR restart, one streamer, Quest log captured and then stopped.
 run_play beat-saber-steam
@@ -312,6 +314,27 @@ expect "play: only alvr.client.stable and the chosen serial are touched" "0" \
     "$(grep -Ev "$allowed_calls" "$FAKE_LOG" | wc -l | tr -d ' ')"
 expect "play: quest log file has the logcat output" "fake logcat line" "$(cat "$work"/home/Library/Logs/BasaltVR/quest-*.log 2>/dev/null)"
 expect "play: logcat process is stopped on exit" "1" "$(logcat_stopped)"
+expect "play: logcat starts now and silences VideoRenderQualityTracker" "1" \
+    "$(count_in 'logcat -v threadtime -T 1 \*:V VideoRenderQualityTracker:S$' "$FAKE_LOG")"
+
+# Log retention: play.zsh deletes BasaltVR logs older than 7 days, and nothing else.
+logs=$work/home/Library/Logs/BasaltVR
+rm -rf "$work/home"; mkdir -p "$logs/sub" "$work/outside"
+old_names=(quest-1.log streamer-1.log runtime-1.log game-1.log steam-1.log app-x-1.log build-1.log steam-shutdown.log quest-1.txt)
+for f in $old_names; do : >"$logs/$f"; done
+: >"$logs/notes.txt"; : >"$logs/sub/game-old.log"; : >"$work/outside/game-old.log"
+ln -s "$work/outside/game-old.log" "$logs/game-link.log"
+: >"$logs/game-new.log"; : >"$logs/quest-6days.log"
+touch -t 202001010000 "$logs"/${^old_names} "$logs/notes.txt" "$logs/sub/game-old.log" \
+    "$work/outside/game-old.log"
+touch -h -t 202001010000 "$logs/game-link.log"
+touch -t "$(date -v-6d +%Y%m%d%H%M)" "$logs/quest-6days.log"
+KEEP_HOME=1 run_play beat-saber-steam
+expect "logs: old BasaltVR logs are deleted" "" "$(cd "$logs" && print -l ${^old_names}(N))"
+expect "logs: new and 6-day-old logs stay" "game-new.log quest-6days.log" \
+    "$(cd "$logs" && print game-new.log(N) quest-6days.log(N))"
+expect "logs: other names, subfolders, links and their targets stay" "4" \
+    "$(print -l "$logs/notes.txt"(N) "$logs/sub/game-old.log"(N) "$logs/game-link.log"(N@) "$work/outside/game-old.log"(N) | grep -c .)"
 
 # Handshake failure once: the ALVR app is restarted and the streamer runs again.
 FAKE_STREAMER_FAIL_N=1 run_play beat-saber-steam
@@ -369,7 +392,7 @@ export FAKE_STREAMER_FAIL_N=0
 # an adb process that is not in our pidfiles is left alone.
 mkdir -p "$work/data/run"
 : >"$FAKE_LOG"
-"$work/bin/adb" -s QUEST3SERIAL01 logcat -v threadtime >/dev/null 2>&1 &
+"$work/bin/adb" -s QUEST3SERIAL01 logcat -v threadtime -T 1 >/dev/null 2>&1 &
 stale=$!
 "$work/bin/adb" -s OTHER logcat -v threadtime >/dev/null 2>&1 &
 other=$!

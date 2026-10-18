@@ -170,14 +170,15 @@ the running Steam without a `steam_appid.txt`.
 profile's bottle (a game started from a running Steam inherits that Steam's old environment),
 starts `basalt-streamer` with BlackHole audio when BlackHole is installed, starts Steam first for
 Steam profiles that need it, then runs the profile. Ctrl-C or the end of the game stops the game,
-Steam, and the streamer. Logs go to `~/Library/Logs/BasaltVR/`.
+Steam, and the streamer. Logs go to `~/Library/Logs/BasaltVR/`; logs there older than 7 days
+(`BASALT_LOG_KEEP_DAYS`) are deleted when a session starts.
 
 | Option | Effect |
 |---|---|
 | `--usb`, `--wifi` | Force the link (`BASALT_TRANSPORT=auto\|usb\|wifi`) |
 | `--quality normal\|high\|max` | Picture size and bitrate; default `high` on USB, `normal` on Wi-Fi (`BASALT_QUALITY`) |
 | `--codec h264\|hevc` | Default `hevc` on USB, `h264` on Wi-Fi (`BASALT_CODEC`) |
-| `--log-quest` / `--no-log-quest` | Save the Quest's `adb logcat` for the session (default on, capped at 200 MB, `BASALT_QUEST_LOG_MAX_MB`) |
+| `--log-quest` / `--no-log-quest` | Save the Quest's `adb logcat` for the session (default on, only lines from this session, no `VideoRenderQualityTracker`, capped at 200 MB, `BASALT_QUEST_LOG_MAX_MB`) |
 
 Flags win over the environment variables. The quality levels map to these streamer settings
 (USB adds `--profile m3pro`, so 72 fps and low latency):
