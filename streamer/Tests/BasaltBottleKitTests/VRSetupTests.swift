@@ -207,8 +207,14 @@ final class VRSetupTests: XCTestCase {
         let proxied = directory.appendingPathComponent("openvr_api_opencomposite.dll")
         let ini = directory.appendingPathComponent("opencomposite.ini")
 
+        // Basalt cannot tell Valve's DLL from a custom one, so the first setup asks.
+        XCTAssertThrowsError(try manager.prepareVR(
+            profileName: "alyx", location: location, mode: .auto, artifacts: artifacts)) {
+            XCTAssertEqual(($0 as? VRCustomFilesError)?.files, [dll.standardizedFileURL])
+        }
         let result = try manager.prepareVR(
-            profileName: "alyx", location: location, mode: .auto, artifacts: artifacts)
+            profileName: "alyx", location: location, mode: .auto, artifacts: artifacts,
+            replaceCustomFiles: true)
         XCTAssertEqual(result.kind, .alyx)
         XCTAssertEqual(result.targets, [dll.standardizedFileURL])
         guard case .ready(.alyx, _) = result.status else { return XCTFail("\(result.status)") }
@@ -292,7 +298,8 @@ final class VRSetupTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: dll), Self.pe(marker: 2))
 
         let result = try manager.prepareVR(
-            profileName: "lab", location: location, mode: .openVR, artifacts: artifacts)
+            profileName: "lab", location: location, mode: .openVR, artifacts: artifacts,
+            replaceCustomFiles: true)
         XCTAssertEqual(result.kind, .openVR)
         XCTAssertEqual(try Data(contentsOf: dll), try Data(contentsOf: artifacts.openComposite))
         XCTAssertEqual(try String(contentsOf: dll.deletingLastPathComponent()
@@ -348,7 +355,8 @@ final class VRSetupTests: XCTestCase {
 
         XCTAssertThrowsError(try manager.prepareVR(
             profileName: "alyx", location: location, mode: .auto, artifacts: artifacts)) {
-            XCTAssertEqual(($0 as? VRCustomFilesError)?.files, [ini.standardizedFileURL])
+            XCTAssertEqual(($0 as? VRCustomFilesError)?.files,
+                           [dll.standardizedFileURL, ini.standardizedFileURL])
         }
         XCTAssertEqual(try Data(contentsOf: dll), valve)
         XCTAssertEqual(try String(contentsOf: ini), custom)
@@ -358,8 +366,8 @@ final class VRSetupTests: XCTestCase {
         let result = try manager.prepareVR(
             profileName: "alyx", location: location, mode: .auto, artifacts: artifacts,
             replaceCustomFiles: true, now: now)
-        XCTAssertEqual(result.replacedCopies.count, 1)
-        let copy = result.replacedCopies[0]
+        XCTAssertEqual(result.replacedCopies.count, 2)
+        let copy = try XCTUnwrap(result.replacedCopies.first { $0.lastPathComponent.hasPrefix("opencomposite.ini") })
         XCTAssertEqual(try String(contentsOf: copy), custom)
         XCTAssertTrue(try String(contentsOf: ini).contains("invertUsingShaders=true"))
 
@@ -388,7 +396,7 @@ final class VRSetupTests: XCTestCase {
     func testRestoreLeavesFilesThatChangedAfterSetup() throws {
         let (location, dll, valve) = try alyxFixture()
         try manager.prepareVR(profileName: "alyx", location: location, mode: .auto,
-                              artifacts: artifacts)
+                              artifacts: artifacts, replaceCustomFiles: true)
         let ini = dll.deletingLastPathComponent().appendingPathComponent("opencomposite.ini")
         try "supersampleRatio=0.5\n".write(to: ini, atomically: true, encoding: .utf8)
         let report = try manager.restoreVR(profileName: "alyx")
@@ -452,7 +460,9 @@ final class VRSetupTests: XCTestCase {
         XCTAssertThrowsError(try manager.prepareVR(
             profileName: "two",
             location: VRGameLocation(executable: exe, folder: exe.deletingLastPathComponent()),
-            mode: .openVR, artifacts: artifacts))
+            mode: .openVR, artifacts: artifacts, replaceCustomFiles: true)) {
+            XCTAssertFalse($0 is VRCustomFilesError, "\($0)")
+        }
         XCTAssertEqual(try Data(contentsOf: first), Self.pe(marker: 2))
         XCTAssertEqual(try Data(contentsOf: second), Self.pe(marker: 3))
         let firstDirectory = try fm.contentsOfDirectory(atPath: first.deletingLastPathComponent().path)
@@ -482,5 +492,149 @@ final class VRSetupTests: XCTestCase {
         XCTAssertThrowsError(try manager.installOpenComposite(
             profileName: "alyx", artifact: artifacts.openComposite, targetDLL: dll))
         XCTAssertEqual(try String(contentsOf: ini), "handColour=#ff0000\n")
+    }
+
+    // MARK: - Review fixes
+
+    func testUnknownGameDLLWithoutBackupStaysUntilReplaceIsConfirmed() throws {
+        let exe = try write(Self.pe(imports: ["openvr_api.dll"], marker: 1), "Games/Own/Own.exe")
+        let foreign = Self.pe(marker: 0x99) // someone's own OpenComposite build
+        let dll = try write(foreign, "Games/Own/openvr_api.dll")
+        let backup = dll.appendingPathExtension("basalt-original")
+        try saveProfile("own", executable: #"C:\Games\Own\Own.exe"#)
+        let location = VRGameLocation(executable: exe, folder: exe.deletingLastPathComponent())
+
+        for _ in 0..<2 {
+            XCTAssertThrowsError(try manager.prepareVR(
+                profileName: "own", location: location, mode: .auto, artifacts: artifacts)) {
+                XCTAssertEqual(($0 as? VRCustomFilesError)?.files, [dll.standardizedFileURL])
+            }
+            XCTAssertEqual(try Data(contentsOf: dll), foreign)
+            XCTAssertFalse(fm.fileExists(atPath: backup.path))
+            XCTAssertEqual(try fm.contentsOfDirectory(atPath: exe.deletingLastPathComponent().path).sorted(),
+                           ["Own.exe", "openvr_api.dll"])
+            XCTAssertEqual(manager.vrSetupStatus(profileName: "own"), .notPrepared)
+        }
+
+        let result = try manager.prepareVR(
+            profileName: "own", location: location, mode: .auto, artifacts: artifacts,
+            replaceCustomFiles: true)
+        XCTAssertEqual(try Data(contentsOf: backup), foreign)
+        XCTAssertEqual(result.replacedCopies.count, 1)
+        XCTAssertEqual(try Data(contentsOf: result.replacedCopies[0]), foreign)
+        XCTAssertEqual(try Data(contentsOf: dll), try Data(contentsOf: artifacts.openComposite))
+
+        // Preparing again needs no permission and keeps the backup.
+        try manager.prepareVR(profileName: "own", location: location, mode: .auto,
+                              artifacts: artifacts)
+        XCTAssertEqual(try Data(contentsOf: backup), foreign)
+
+        try manager.restoreVR(profileName: "own")
+        XCTAssertEqual(try Data(contentsOf: dll), foreign)
+        XCTAssertEqual(try Data(contentsOf: result.replacedCopies[0]), foreign)
+    }
+
+    func testReplacedCopiesAtTheSameTimeNeverOverwriteEachOther() throws {
+        let (location, dll, _) = try alyxFixture()
+        let directory = dll.deletingLastPathComponent()
+        let ini = directory.appendingPathComponent("opencomposite.ini")
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let stamp = BottleManager.timestamp(now)
+        // Collisions at the first names: a link and a folder must be left alone.
+        let elsewhere = try write(Data("elsewhere".utf8), "Shared/elsewhere.txt")
+        try fm.createSymbolicLink(
+            at: directory.appendingPathComponent("opencomposite.ini.basalt-replaced-\(stamp)"),
+            withDestinationURL: elsewhere)
+        try fm.createDirectory(
+            at: directory.appendingPathComponent("opencomposite.ini.basalt-replaced-\(stamp)-2"),
+            withIntermediateDirectories: true)
+
+        try manager.prepareVR(profileName: "alyx", location: location, mode: .auto,
+                              artifacts: artifacts, replaceCustomFiles: true, now: now)
+        var copies = [URL]()
+        for text in ["first=1\n", "second=2\n"] {
+            try text.write(to: ini, atomically: true, encoding: .utf8)
+            let result = try manager.prepareVR(
+                profileName: "alyx", location: location, mode: .auto, artifacts: artifacts,
+                replaceCustomFiles: true, now: now)
+            XCTAssertEqual(result.replacedCopies.count, 1)
+            copies += result.replacedCopies
+        }
+        XCTAssertEqual(Set(copies).count, 2)
+        XCTAssertEqual(try String(contentsOf: copies[0]), "first=1\n")
+        XCTAssertEqual(try String(contentsOf: copies[1]), "second=2\n")
+        XCTAssertEqual(try String(contentsOf: elsewhere), "elsewhere")
+        var isDirectory: ObjCBool = false
+        XCTAssertTrue(fm.fileExists(
+            atPath: directory.appendingPathComponent("opencomposite.ini.basalt-replaced-\(stamp)-2").path,
+            isDirectory: &isDirectory) && isDirectory.boolValue)
+    }
+
+    func testAlyxArgumentsRemoveHelloXRSpaceOnlyWithKnownNames() {
+        let change = BottleManager.alyxArguments(["--graphics", "D3D11", "--space", "Local"])
+        XCTAssertEqual(change.arguments, ["-vr", "-dx11"])
+        XCTAssertEqual(change.removed, ["--graphics", "D3D11", "--space", "Local"])
+
+        let other = BottleManager.alyxArguments(["-s", "Custom", "-S", "stage", "--space"])
+        XCTAssertEqual(other.arguments, ["-s", "Custom", "--space", "-vr", "-dx11"])
+        XCTAssertEqual(other.removed, ["-S", "stage"])
+    }
+
+    func testRestorePutsBackTheExactArgumentOrder() throws {
+        let (location, _, _) = try alyxFixture()
+        let original = ["-novid", "--graphics", "D3D11", "--space", "Local", "-console"]
+        var profile = try manager.loadProfile("alyx")
+        profile.arguments = original
+        try manager.saveProfile(profile)
+        try manager.prepareVR(profileName: "alyx", location: location, mode: .auto,
+                              artifacts: artifacts, replaceCustomFiles: true)
+        XCTAssertEqual(try manager.loadProfile("alyx").arguments, ["-novid", "-console", "-vr", "-dx11"])
+        try manager.prepareVR(profileName: "alyx", location: location, mode: .auto,
+                              artifacts: artifacts)
+        try manager.restoreVR(profileName: "alyx")
+        XCTAssertEqual(try manager.loadProfile("alyx").arguments, original)
+
+        // After the user edits the arguments, Restore keeps the edit and every pair together.
+        // Restore removed the backup, so the game's DLL needs permission again.
+        try manager.prepareVR(profileName: "alyx", location: location, mode: .auto,
+                              artifacts: artifacts, replaceCustomFiles: true)
+        profile = try manager.loadProfile("alyx")
+        profile.arguments.append("-high")
+        try manager.saveProfile(profile)
+        try manager.restoreVR(profileName: "alyx")
+        let restored = try manager.loadProfile("alyx").arguments
+        XCTAssertEqual(restored, ["-novid", "-console", "-high", "--graphics", "D3D11", "--space", "Local"])
+    }
+
+    func testRestoreWithoutTheOriginalKeepsACoherentSetupAndTheRecord() throws {
+        let (location, dll, valve) = try alyxFixture()
+        let directory = dll.deletingLastPathComponent()
+        let backup = dll.appendingPathExtension("basalt-original")
+        let proxied = directory.appendingPathComponent("openvr_api_opencomposite.dll")
+        let ini = directory.appendingPathComponent("opencomposite.ini")
+        try manager.prepareVR(profileName: "alyx", location: location, mode: .auto,
+                              artifacts: artifacts, replaceCustomFiles: true)
+        try fm.removeItem(at: backup)
+
+        let report = try manager.restoreVR(profileName: "alyx")
+        XCTAssertFalse(report.isComplete)
+        XCTAssertEqual(report.unrestored, [dll.standardizedFileURL])
+        XCTAssertFalse(report.restored.contains(dll.standardizedFileURL))
+        XCTAssertEqual(Set(report.kept), Set([dll, proxied, ini].map(\.standardizedFileURL)))
+        XCTAssertEqual(try Data(contentsOf: dll), try Data(contentsOf: artifacts.proxy))
+        XCTAssertEqual(try Data(contentsOf: proxied), try Data(contentsOf: artifacts.openComposite))
+        XCTAssertTrue(fm.fileExists(atPath: ini.path))
+        XCTAssertEqual(try manager.loadProfile("alyx").arguments, ["-novid", "-vr", "-dx11"])
+        guard case .ready = manager.vrSetupStatus(profileName: "alyx") else {
+            return XCTFail("the setup must stay recorded")
+        }
+
+        // With the original back, Restore can finish.
+        try valve.write(to: backup)
+        let retry = try manager.restoreVR(profileName: "alyx")
+        XCTAssertTrue(retry.isComplete)
+        XCTAssertEqual(try Data(contentsOf: dll), valve)
+        XCTAssertEqual(try manager.loadProfile("alyx").arguments, ["-novid", "-g", "D3D11", "-vulkan"])
+        XCTAssertEqual(manager.vrSetupStatus(profileName: "alyx"), .notPrepared)
     }
 }
