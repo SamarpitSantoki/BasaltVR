@@ -480,6 +480,103 @@ final class AlvrVideoStreamTests: XCTestCase {
                                    timestampNanoseconds: 2))
     }
 
+    /// A write that started less than one frame period ago is not "busy":
+    /// the next access unit waits behind it (one at most) instead of being
+    /// dropped before encoding.
+    func testShortInFlightWiredWriteIsNotBusyAndQueuesOneAccessUnit() throws {
+        let (listener, port) = try Self.makeLoopbackListener(receiveBufferBytes: 4 * 1_024)
+        defer { close(listener) }
+        let sender = try AlvrVideoStreamSender(
+            host: "127.0.0.1", remotePort: port, localPort: 0, transport: .tcp,
+            tcpStallTimeoutNanoseconds: 30_000_000_000,
+            inFlightBusyAfterNanoseconds: 30_000_000_000)
+        let peer = accept(listener, nil, nil)
+        XCTAssertGreaterThanOrEqual(peer, 0)
+        defer { close(peer) }
+        defer { sender.close() }
+        let lock = NSLock()
+        var drops = 0
+        sender.onFrameDropped = {
+            lock.lock()
+            drops += 1
+            lock.unlock()
+        }
+        var sentPacketIndices = [Int]()
+        let bothSent = expectation(description: "both access units written")
+        bothSent.expectedFulfillmentCount = 2
+        sender.onFrameSent = { report in
+            lock.lock()
+            sentPacketIndices.append(Int(report.timestampNanoseconds))
+            lock.unlock()
+            bothSent.fulfill()
+        }
+
+        let accessUnit = Data([0, 0, 0, 1, 0x65])
+            + Data(repeating: 0x55, count: 8 * 1_024 * 1_024)
+        XCTAssertTrue(sender.send(annexB: accessUnit, timestampNanoseconds: 1, isIDR: true))
+        usleep(50_000)
+        XCTAssertFalse(sender.isBusy, "the write in flight is younger than its busy threshold")
+        XCTAssertTrue(sender.send(annexB: Data([0, 0, 0, 1, 0x41]),
+                                  timestampNanoseconds: 2, isIDR: false),
+                      "queued behind the write in flight")
+        XCTAssertTrue(sender.isBusy, "the one queue slot is taken")
+        XCTAssertFalse(sender.send(annexB: Data([0, 0, 0, 1, 0x41]),
+                                   timestampNanoseconds: 3, isIDR: false),
+                       "never more than one access unit waits")
+        lock.lock()
+        XCTAssertEqual(drops, 1)
+        lock.unlock()
+
+        // The headset reads again: both access units arrive, in order.
+        let firstWireBytes = try AlvrVideoPacketizer.shards(
+            annexB: accessUnit, timestampNanoseconds: 1, isIDR: true, packetIndex: 0)
+            .reduce(0) { $0 + $1.count }
+        var bytesRead = 0
+        while bytesRead < firstWireBytes {
+            let prefix = try readExactly(4, from: peer)
+            bytesRead += 4 + (try readExactly(
+                prefix.reduce(0) { ($0 << 8) | Int($1) }, from: peer)).count
+        }
+        let nextPrefix = try readExactly(4, from: peer)
+        let nextPayload = try readExactly(
+            nextPrefix.reduce(0) { ($0 << 8) | Int($1) }, from: peer)
+        XCTAssertEqual(nextPayload[2..<6], Data([0, 0, 0, 1]), "next packet index")
+        wait(for: [bothSent], timeout: 2)
+        lock.lock()
+        XCTAssertEqual(sentPacketIndices, [1, 2])
+        lock.unlock()
+        let deadline = Date().addingTimeInterval(1)
+        while sender.isBusy, Date() < deadline { usleep(1_000) }
+        XCTAssertFalse(sender.isBusy)
+    }
+
+    /// A write older than one frame period is a real stall: frames are not
+    /// encoded, and an encoded frame handed over now is dropped (which starts
+    /// the IDR recovery in the streamer).
+    func testLongInFlightWiredWriteIsBusyAndDropsTheNextAccessUnit() throws {
+        let (listener, port) = try Self.makeLoopbackListener(receiveBufferBytes: 4 * 1_024)
+        defer { close(listener) }
+        let sender = try AlvrVideoStreamSender(
+            host: "127.0.0.1", remotePort: port, localPort: 0, transport: .tcp,
+            tcpStallTimeoutNanoseconds: 30_000_000_000,
+            inFlightBusyAfterNanoseconds: 20_000_000)
+        let peer = accept(listener, nil, nil)
+        XCTAssertGreaterThanOrEqual(peer, 0)
+        defer { close(peer) }
+        defer { sender.close() }
+        let dropped = expectation(description: "frame dropped")
+        sender.onFrameDropped = { dropped.fulfill() }
+
+        XCTAssertTrue(sender.send(
+            annexB: Data(repeating: 0x55, count: 8 * 1_024 * 1_024),
+            timestampNanoseconds: 1, isIDR: true))
+        usleep(100_000)
+        XCTAssertTrue(sender.isBusy, "the headset has read nothing for 100 ms")
+        XCTAssertFalse(sender.send(annexB: Data([0, 0, 0, 1, 0x41]),
+                                   timestampNanoseconds: 2, isIDR: false))
+        wait(for: [dropped], timeout: 1)
+    }
+
     private static func makeLoopbackListener(receiveBufferBytes: Int32? = nil) throws
         -> (listener: Int32, port: UInt16) {
         let listener = socket(AF_INET, SOCK_STREAM, 0)

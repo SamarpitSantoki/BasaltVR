@@ -298,6 +298,66 @@ public struct AlvrAudioSendReport: Equatable, Sendable {
     }
 }
 
+/// Decides whether a video access unit handed to the sender now is written
+/// or dropped. At most one access unit is written and one waits behind it.
+///
+/// A write in flight only counts as "busy" once it has run longer than
+/// `busyAfterNanoseconds` (one frame period at the negotiated refresh rate).
+/// A normal write takes 0.3-1.6 ms, and the next frame needs ~11 ms to
+/// encode, so dropping it because such a write had just started was needless
+/// (0.7-1.7% of frames on an idle link). A longer write is a real stall
+/// (a paused USB link, a saturated Wi-Fi queue): frames are then dropped, as
+/// before, so stale frames never pile up and `VideoLossRecoveryGate` keeps
+/// the reference chain intact. A frame that waits does so for less than one
+/// frame period plus the rest of the write, so latency does not grow.
+///
+/// Not thread-safe; the sender holds its state lock. Times are Mac uptime
+/// nanoseconds.
+struct AlvrVideoSendAdmission: Sendable {
+    /// One access unit written plus one waiting.
+    static let maximumOutstanding = 2
+
+    var busyAfterNanoseconds: UInt64
+    /// Access units accepted and not yet finished (0, 1, or 2).
+    private(set) var outstanding = 0
+    /// When the access unit at the head of the queue became the one written.
+    private var headSince: UInt64 = 0
+
+    init(busyAfterNanoseconds: UInt64) {
+        self.busyAfterNanoseconds = busyAfterNanoseconds
+    }
+
+    /// One frame period at `hertz`, or nil for a rate outside 30-240 Hz.
+    static func busyAfterNanoseconds(refreshRate hertz: Float) -> UInt64? {
+        guard hertz.isFinite, hertz >= 30, hertz <= 240 else { return nil }
+        return UInt64((1_000_000_000 / Double(hertz)).rounded())
+    }
+
+    /// True when `admit(now:)` would drop an access unit handed over now.
+    func wouldDrop(now: UInt64) -> Bool {
+        switch outstanding {
+        case 0: return false
+        case 1: return now &- headSince > busyAfterNanoseconds
+        default: return true
+        }
+    }
+
+    /// Accepts an access unit unless it would be dropped.
+    mutating func admit(now: UInt64) -> Bool {
+        guard !wouldDrop(now: now) else { return false }
+        if outstanding == 0 { headSince = now }
+        outstanding += 1
+        return true
+    }
+
+    /// The access unit at the head of the queue was written (or abandoned).
+    mutating func complete(now: UInt64) {
+        guard outstanding > 0 else { return }
+        outstanding -= 1
+        if outstanding > 0 { headSince = now }
+    }
+}
+
 /// Sends ALVR-sharded H.264 access units over the v20 stream socket. ALVR
 /// uses UDP over Wi-Fi and a length-framed TCP byte stream through adb USB
 /// forwarding when the negotiated session has `wired` enabled.
@@ -330,7 +390,8 @@ public final class AlvrVideoStreamSender: @unchecked Sendable {
     /// stream counts as dead. The adb USB link and the Quest's reader pause
     /// for up to ~1.5 s in both directions while ALVR keeps rendering; such a
     /// pause must only delay frames. Stale frames never queue meanwhile:
-    /// `send` drops new frames while one is in flight. Matches the control
+    /// `send` keeps at most one frame waiting and drops new frames once the
+    /// write in flight is older than one frame period. Matches the control
     /// connection's silence timeout, so the video path never gives up first.
     public static let defaultTCPStallTimeoutNanoseconds =
         AlvrSessionHandshakeResult.defaultReceiveTimeoutNanoseconds
@@ -346,7 +407,12 @@ public final class AlvrVideoStreamSender: @unchecked Sendable {
     private var nextHapticsPacketIndex: UInt32 = 0
     private var nextAudioPacketIndex: UInt32 = 0
     private let stateLock = NSLock()
-    private var sendInFlight = false
+    /// One frame period at 72 Hz, the Quest default, until the session
+    /// negotiates its refresh rate (`setInFlightBusyThreshold`).
+    public static let defaultInFlightBusyAfterNanoseconds: UInt64 =
+        AlvrVideoSendAdmission.busyAfterNanoseconds(refreshRate: 72)!
+    /// Guarded by `stateLock`.
+    private var videoAdmission: AlvrVideoSendAdmission
     private var audioSendInFlight = false
     private var lastCongestionRecovery = DispatchTime(uptimeNanoseconds: 0)
     private var latestTrackingTimestamp: UInt64?
@@ -363,9 +429,12 @@ public final class AlvrVideoStreamSender: @unchecked Sendable {
     public init(host: String, remotePort: UInt16 = defaultPort,
                 localPort: UInt16 = defaultPort,
                 transport: AlvrStreamTransport = .udp,
-                tcpStallTimeoutNanoseconds: UInt64 = defaultTCPStallTimeoutNanoseconds) throws {
+                tcpStallTimeoutNanoseconds: UInt64 = defaultTCPStallTimeoutNanoseconds,
+                inFlightBusyAfterNanoseconds: UInt64 = defaultInFlightBusyAfterNanoseconds) throws {
         self.transport = transport
         self.tcpStallTimeoutNanoseconds = tcpStallTimeoutNanoseconds
+        self.videoAdmission = AlvrVideoSendAdmission(
+            busyAfterNanoseconds: inFlightBusyAfterNanoseconds)
         let socketType = transport == .udp ? SOCK_DGRAM : SOCK_STREAM
         let fd = Darwin.socket(AF_INET, socketType, 0)
         guard fd >= 0 else { throw Self.socketError("video socket() failed") }
@@ -424,8 +493,9 @@ public final class AlvrVideoStreamSender: @unchecked Sendable {
             // unit. Wired ALVR is different: upstream requests the maximum OS
             // TCP buffers, and a 64 KiB buffer makes ordinary IDRs repeatedly
             // block. One MiB matches the Quest client's observed receive window;
-            // `send` keeps at most one access unit in flight, which bounds
-            // hidden delay while the headset is slow to read.
+            // `send` keeps at most one access unit waiting behind the one in
+            // flight, which bounds hidden delay while the headset is slow to
+            // read.
             var sendBufferSize = transport == .tcp
                 ? Self.tcpSendBufferBytes : Self.udpSendBufferBytes
             setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sendBufferSize,
@@ -484,33 +554,51 @@ public final class AlvrVideoStreamSender: @unchecked Sendable {
         Darwin.close(socket)
     }
 
-    /// True when `send` would drop a frame handed to it now: a write is
-    /// still in flight (for example a paused USB link) or the transport
-    /// failed. Callers skip *encoding* such a frame, which keeps the H.264
-    /// reference chain intact (see `VideoLossRecoveryGate`).
+    /// Makes a write in flight count as busy after one frame period at
+    /// `hertz`, the negotiated headset refresh rate. Returns false (and keeps
+    /// the previous threshold) for a rate outside 30-240 Hz.
+    @discardableResult
+    public func setInFlightBusyThreshold(refreshRate hertz: Float) -> Bool {
+        guard let threshold = AlvrVideoSendAdmission.busyAfterNanoseconds(
+            refreshRate: hertz) else { return false }
+        stateLock.lock()
+        videoAdmission.busyAfterNanoseconds = threshold
+        stateLock.unlock()
+        return true
+    }
+
+    /// True when `send` would drop a frame handed to it now: the write in
+    /// flight has run longer than one frame period (for example a paused
+    /// USB link), a frame already waits behind it, or the transport failed.
+    /// A write that started moments ago does not count: the next frame waits
+    /// behind it. Callers skip *encoding* a frame while busy, which keeps
+    /// the H.264 reference chain intact (see `VideoLossRecoveryGate`).
     public var isBusy: Bool {
+        let now = DispatchTime.now().uptimeNanoseconds
         stateLock.lock()
         defer { stateLock.unlock() }
-        return sendInFlight || transportFailed
+        return transportFailed || videoAdmission.wouldDrop(now: now)
     }
 
     @discardableResult
     public func send(annexB: Data, timestampNanoseconds: UInt64, isIDR: Bool) -> Bool {
         stateLock.lock()
-        guard !sendInFlight, !transportFailed else {
+        guard !transportFailed,
+              videoAdmission.admit(now: DispatchTime.now().uptimeNanoseconds) else {
             stateLock.unlock()
             onFrameDropped?()
             return false
         }
-        sendInFlight = true
         stateLock.unlock()
         queue.async { [self] in
             defer {
+                let now = DispatchTime.now().uptimeNanoseconds
                 stateLock.lock()
-                sendInFlight = false
+                videoAdmission.complete(now: now)
                 stateLock.unlock()
             }
-            guard !socketClosed else { return }
+            // A frame that waited behind a write that failed the transport.
+            guard !socketClosed, !isTransportFailed else { return }
             do {
                 let startedAt = DispatchTime.now().uptimeNanoseconds
                 let shards = try AlvrVideoPacketizer.shards(
@@ -881,8 +969,9 @@ public final class AlvrVideoStreamRouter: @unchecked Sendable {
         return sender?.timestampForVideoFrame()
     }
 
-    /// True when an installed stream would drop a frame submitted now: a
-    /// write is in flight, the transport failed, or (desktop frames, which
+    /// True when an installed stream would drop a frame submitted now: its
+    /// write in flight is older than one frame period, the transport failed,
+    /// or (desktop frames, which
     /// take the newest tracking timestamp) no fresh timestamp exists. False
     /// without a stream.
     public func isBusy(requiringTrackingTimestamp: Bool) -> Bool {
