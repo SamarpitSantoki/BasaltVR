@@ -73,18 +73,22 @@ shows the session state with a Stop button.
      `game/bin/win64/openvr_api.dll` with OpenComposite beside it as
      `openvr_api_opencomposite.dll`, writes the `alyx` preset (`initUsingVulkan=false`,
      `invertUsingShaders=true`), adds `-vr -dx11` to the profile's arguments, and removes
-     `-vulkan` and `hello_xr` test flags (`-g D3D11`, `-ff Hmd`, `-vc Stereo`, `-bm Opaque`).
+     `-vulkan` and `hello_xr` test flags (`-g D3D11`, `-ff Hmd`, `-vc Stereo`, `-bm Opaque`,
+     `--space Local`).
    - Basalt uses only these local builds and never downloads OpenComposite. When one is missing,
      the sheet names the command that builds it (`runtime/scripts/build-opencomposite.zsh`, or
      `runtime/scripts/test-openvr-proxy.zsh` for the proxy) and Prepare stays disabled. Both must
      be 64-bit PE DLLs, and a 32-bit game DLL is refused.
    - The game's first `openvr_api.dll` is kept as `openvr_api.dll.basalt-original` and never
-     replaced by a later setup. Files Basalt did not write (a different `openvr_api.dll` when a
-     backup already exists, a custom `openvr_api_opencomposite.dll`, or an edited
+     replaced by a later setup. Files Basalt did not write (including the game's first
+     `openvr_api.dll`, a custom `openvr_api_opencomposite.dll`, or an edited
      `opencomposite.ini`) stop the setup with nothing changed. **Replace and Keep Copies** then
-     saves each as `<name>.basalt-replaced-<UTC time>` before replacing it.
+     saves each as `<name>.basalt-replaced-<UTC time>` before replacing it, with a numeric suffix
+     when needed so earlier copies are never overwritten. Add Game asks in the same sheet;
+     retrying uses the profile already added.
    - Every target must be inside the bottle's `drive_c` after resolving links, and Basalt does not
-     write through a symbolic link. A failure part-way puts every touched file and the profile
+     replace a file that is itself a symbolic link. Folder links that stay inside `drive_c`
+     are allowed. A failure part-way puts every touched file and the profile
      back. Repeating Prepare VR is safe; changing the mode or the target folders needs Restore
      first.
    - What was installed, with SHA-256 hashes, is recorded in `VRSetup/<profile>.json` in the data
@@ -95,7 +99,9 @@ shows the session state with a Stop button.
      that needs a headset test.
    - **Restore Game Files…** puts the original DLL back, removes the files Basalt installed and
      its argument changes, and deletes the record. Files that changed after setup are left alone
-     and listed, and the `.basalt-replaced-…` copies are kept.
+     and listed, and the `.basalt-replaced-…` copies are kept. If the original DLL backup is
+     missing, Restore keeps that folder's complete setup and record for a later retry and
+     reports that restoration is incomplete. Unedited arguments return to their exact original order.
 5. **Profiles** can edit their source, Windows executable, working directory, arguments, and
    environment, or be deleted without removing the game (or Basalt's VR files; restore first).
    The profile editor keeps the advanced **Install a DLL by Hand…** installer, which writes a
