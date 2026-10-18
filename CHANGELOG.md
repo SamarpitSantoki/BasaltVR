@@ -132,6 +132,16 @@ before each session). The streamer reports a mismatched DLL instead of connectin
 
 ### Fixed
 
+- The OpenXR runtime now samples the head once per frame. For one `xrWaitFrame` display time,
+  the first `xrLocateViews` or `xrLocateSpace` pins the newest head sample, and every later head
+  query for that time returns the same pose. The frame goes to the streamer with that sample's
+  timestamp. Before, OpenComposite games (Half-Life: Alyx) located each frame several times, each
+  call got a newer sample (head poses arrive at about 216 Hz), and the last call set the frame's
+  timestamp. The game rendered with an older pose than the timestamp named, so ALVR reprojected
+  from the wrong pose and the world wobbled a little all the time. hello_xr locates once per
+  frame and was not affected. The runtime log prints a `head pose pinning:` line every 5 s: the
+  number of frames where a later head query saw a newer sample (these frames had the wrong
+  timestamp before this fix).
 - Sessions started from the Play page are now in the session history and have an app log
   (`app-<profile>-<time>.log`), like sessions started from the Library or the Stream page.
   Before, only `play.zsh`'s streamer, game, runtime, and Quest logs were kept

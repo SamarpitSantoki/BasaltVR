@@ -425,7 +425,15 @@ if [[ -f ${fork_install}/x86_64-windows/d3d11.dll && -f ${fork_install}/x86_64-u
         cat "${runtime_log}" >&2 2>/dev/null || true
         exit 1
     fi
-    print "PASS: BASALT_RUNTIME_LOG records compositor activation and layer diagnostics"
+    # The periodic head-pinning line; the daemon's head sample never changes
+    # within a frame here, so no frame may report a newer later sample.
+    if ! grep -q 'head pose pinning: 0 of [1-9][0-9]* frames since the last report' \
+            "${runtime_log}"; then
+        print -u2 "FAIL: BASALT_RUNTIME_LOG lacks the head pose pinning diagnostic"
+        cat "${runtime_log}" >&2 2>/dev/null || true
+        exit 1
+    fi
+    print "PASS: BASALT_RUNTIME_LOG records compositor activation, layer, and head pinning diagnostics"
     rm -f "${runtime_log}"
 
     # The production streamer's RuntimeLink, not just the C test daemon, must

@@ -71,12 +71,16 @@ constexpr size_t kLocatedViewsSampleCapacity = 16;
 std::array<LocatedViewsSample, kLocatedViewsSampleCapacity> gLocatedViewsSamples{};
 size_t gNextLocatedViewsSample = 0;
 
+// The first tracked xrLocateViews for a displayTime wins: a later call must
+// not retag the frame with a sample the application did not render with.
 void recordLocatedViewsSample(
     XrSession session, XrTime displayTime, uint64_t questTimestamp) {
     AcquireSRWLockExclusive(&gSpaceLock);
     for (LocatedViewsSample& sample : gLocatedViewsSamples) {
         if (sample.session == session && sample.displayTime == displayTime) {
-            sample.questTimestamp = questTimestamp;
+            if (sample.questTimestamp == 0) {
+                sample.questTimestamp = questTimestamp;
+            }
             ReleaseSRWLockExclusive(&gSpaceLock);
             return;
         }
@@ -647,8 +651,13 @@ void invalidateSpacesForSession(XrSession session) {
 }
 
 uint64_t locatedViewsQuestTimestamp(XrSession session, XrTime displayTime) {
-    AcquireSRWLockShared(&gSpaceLock);
+    // A predictedDisplayTime's head sample is pinned by its first head query,
+    // whether xrLocateViews or xrLocateSpace (OpenComposite's WaitGetPoses).
     uint64_t timestamp = 0;
+    if (controlPinnedHeadTimestamp(session, displayTime, &timestamp)) {
+        return timestamp;
+    }
+    AcquireSRWLockShared(&gSpaceLock);
     for (size_t offset = 0; offset < kLocatedViewsSampleCapacity; ++offset) {
         const size_t index =
             (gNextLocatedViewsSample + kLocatedViewsSampleCapacity - 1 - offset) %
