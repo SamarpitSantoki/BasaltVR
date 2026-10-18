@@ -387,6 +387,11 @@ struct AddGameSheet: View {
     @State private var detection: VRGameDetection?
     @State private var detectionError: String?
     @State private var vrMode = VRMode.auto
+    /// The profile this sheet already added, so a retry or confirmation never adds another.
+    @State private var addedProfile: String?
+    @State private var customFiles: VRCustomFilesError?
+    @State private var vrError: String?
+    @State private var vrNotice: String?
 
     private var bottle: ManagedBottle? {
         model.bottles.first { $0.name == selectedBottle }
@@ -420,6 +425,7 @@ struct AddGameSheet: View {
 
     private var canAdd: Bool {
         bottle != nil && executable != nil && !isOutsideBottle && !trimmedName.isEmpty && !isAdding
+            && addedProfile == nil
     }
 
     var body: some View {
@@ -470,10 +476,26 @@ struct AddGameSheet: View {
                         Text("Separate arguments with spaces. Quotes are not parsed, so an argument cannot contain a space.")
                             .formFooterStyle()
                     }
+                    .disabled(addedProfile != nil)
 
                     if executable != nil, !isOutsideBottle {
                         VRSetupSection(detection: detection, detectionError: detectionError,
                                        mode: $vrMode, artifacts: model.vrArtifacts)
+                    }
+
+                    if let vrNotice {
+                        Section {
+                            Label(vrNotice, systemImage: "info.circle")
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    if let vrError {
+                        Section {
+                            Label(vrError, systemImage: "xmark.octagon.fill")
+                                .foregroundStyle(.red)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                        }
                     }
                 }
                 .formStyle(.grouped)
@@ -481,19 +503,45 @@ struct AddGameSheet: View {
             }
         } actions: {
             Spacer()
-            Button("Cancel") { dismiss() }
-                .keyboardShortcut(.cancelAction)
-                .disabled(isAdding)
-            Button("Add Only") { add(prepare: false) }
-                .help("Add the game without changing its files")
-                .disabled(!canAdd)
-            Button(vrKind == .openXR ? "Add Game" : "Add & Prepare VR") { add(prepare: true) }
-                .keyboardShortcut(.defaultAction)
-                .buttonStyle(.borderedProminent)
-                .disabled(!canAdd || !canPrepare)
+            if isAdding { ProgressView().controlSize(.small) }
+            if addedProfile != nil {
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(isAdding)
+                Button("Prepare VR") { add(prepare: true) }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isAdding || !canPrepare)
+            } else {
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(isAdding)
+                Button("Add Only") { add(prepare: false) }
+                    .help("Add the game without changing its files")
+                    .disabled(!canAdd)
+                Button(vrKind == .openXR ? "Add Game" : "Add & Prepare VR") { add(prepare: true) }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!canAdd || !canPrepare)
+            }
         }
         .frame(width: 620, height: 640)
         .interactiveDismissDisabled(isAdding)
+        .confirmationDialog(
+            "Replace files Basalt did not write?",
+            isPresented: Binding(get: { customFiles != nil }, set: { if !$0 { customFiles = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Replace and Keep Copies") { add(prepare: true, replacing: true) }
+            Button("Cancel", role: .cancel) {
+                customFiles = nil
+                if let addedProfile {
+                    vrNotice = "Added \(addedProfile). Its VR files are unchanged. Choose Prepare VR to try again, or Done."
+                }
+            }
+        } message: {
+            Text(customFiles?.localizedDescription ?? "")
+        }
         .onAppear {
             if selectedBottle.isEmpty, model.bottles.count == 1 {
                 selectedBottle = model.bottles[0].name
@@ -526,29 +574,42 @@ struct AddGameSheet: View {
         }
     }
 
-    private func add(prepare: Bool) {
+    /// Adds the profile once, then prepares VR. Files Basalt did not write are confirmed here,
+    /// in this sheet, and a retry reuses the profile already added.
+    private func add(prepare: Bool, replacing: Bool = false) {
         guard let bottle, let executable, let location = vrLocation else { return }
         isAdding = true
+        customFiles = nil
+        vrError = nil
+        vrNotice = nil
         let mode = vrMode
         Task {
-            guard let profileName = await model.createGameProfile(
-                named: trimmedName, executable: executable, source: source,
-                arguments: ManualGame.arguments(from: arguments), in: bottle) else {
-                isAdding = false
-                return
-            }
-            if prepare {
-                switch await model.prepareVR(profileName: profileName, location: location,
-                                             mode: mode) {
-                case .success:
-                    break
-                case .failure(let error as VRCustomFilesError):
-                    model.alertMessage = "Added \(profileName), but VR setup stopped. \(error.localizedDescription) To replace them, open the game's ⋯ menu → Prepare VR…."
-                case .failure(let error):
-                    model.alertMessage = "Added \(profileName), but VR setup did not finish: \(error.localizedDescription)"
+            let profileName: String
+            if let addedProfile {
+                profileName = addedProfile
+            } else {
+                guard let created = await model.createGameProfile(
+                    named: trimmedName, executable: executable, source: source,
+                    arguments: ManualGame.arguments(from: arguments), in: bottle) else {
+                    isAdding = false
+                    return
                 }
+                addedProfile = created
+                profileName = created
             }
-            dismiss()
+            guard prepare else { return dismiss() }
+            switch await model.prepareVR(profileName: profileName, location: location,
+                                         mode: mode, replaceCustomFiles: replacing) {
+            case .success:
+                isAdding = false
+                dismiss()
+                return
+            case .failure(let error as VRCustomFilesError):
+                customFiles = error
+            case .failure(let error):
+                vrError = "Added \(profileName), but VR setup did not finish: \(error.localizedDescription)"
+            }
+            isAdding = false
         }
     }
 }

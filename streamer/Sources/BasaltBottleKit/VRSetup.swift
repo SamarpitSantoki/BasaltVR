@@ -67,6 +67,11 @@ public struct VRSetupRecord: Codable, Equatable, Sendable {
     /// Launch arguments setup added or removed, so Restore can undo them.
     public var addedArguments: [String]
     public var removedArguments: [String]
+    /// The arguments before the first setup and right after the last one. Restore puts back
+    /// `originalArguments` exactly while the profile still has `installedArguments`; after the
+    /// user edits them it undoes only `addedArguments` and `removedArguments`.
+    public var originalArguments: [String]?
+    public var installedArguments: [String]?
 }
 
 public enum VRSetupStatus: Equatable, Sendable {
@@ -95,18 +100,25 @@ public struct VRPrepareResult: Equatable, Sendable {
 
 public struct VRRestoreReport: Equatable, Sendable {
     public var restored: [URL]
-    /// Files Restore left alone because they changed after setup.
+    /// Files Restore left alone: they changed after setup, or they belong to a target whose
+    /// original DLL is gone.
     public var kept: [URL]
+    /// Game DLLs Basalt could not put back because `openvr_api.dll.basalt-original` is
+    /// missing. Their setup stays in place and recorded, so Restore can run again later.
+    public var unrestored: [URL] = []
+
+    public var isComplete: Bool { unrestored.isEmpty }
 }
 
 /// Prepare found files that Basalt did not write and will not replace without permission:
-/// a custom OpenComposite, an edited `opencomposite.ini`, or an unknown `openvr_api.dll`.
+/// the game's `openvr_api.dll` (Basalt cannot tell Valve's DLL from a custom OpenComposite),
+/// a custom OpenComposite beside the proxy, or an edited `opencomposite.ini`.
 public struct VRCustomFilesError: LocalizedError, Equatable {
     public let files: [URL]
 
     public var errorDescription: String? {
         let names = files.map { "• " + $0.path }.joined(separator: "\n")
-        return "These files were not written by Basalt, so Prepare VR left everything unchanged:\n\(names)\nReplace them only if you want Basalt's setup; Basalt keeps a copy of each."
+        return "Basalt did not write these files and cannot tell if they are the game's own or a custom setup, so Prepare VR changed nothing:\n\(names)\nReplace them only if you want Basalt's setup. Basalt keeps a copy of each, and Restore puts the game's openvr_api.dll back."
     }
 }
 
@@ -195,10 +207,11 @@ extension BottleManager {
     /// Makes the game reach Basalt's OpenXR runtime: OpenComposite for OpenVR games, and the
     /// proxy plus the `alyx` preset for Half-Life: Alyx. Native OpenXR games change nothing.
     ///
-    /// Safe to repeat. The first original DLL stays in `openvr_api.dll.basalt-original`.
-    /// Files Basalt did not write stop the setup with `VRCustomFilesError` unless
-    /// `replaceCustomFiles` is set; then each is kept as `<name>.basalt-replaced-<time>`.
-    /// Any failure puts every touched file back.
+    /// Safe to repeat. Files Basalt did not write, including the game's first `openvr_api.dll`,
+    /// stop the setup with `VRCustomFilesError` unless `replaceCustomFiles` is set; then each is
+    /// kept as a new `<name>.basalt-replaced-<time>[-n]` that never replaces another file, and
+    /// the first game DLL also stays in `openvr_api.dll.basalt-original`, which is never
+    /// replaced. Any failure puts every touched file back.
     @discardableResult
     public func prepareVR(profileName: String, location: VRGameLocation, mode: VRMode,
                           artifacts: VRArtifacts, replaceCustomFiles: Bool = false,
@@ -276,7 +289,21 @@ extension BottleManager {
         var custom = [URL]()
         var recordTargets = [VRSetupRecord.Target]()
         let stamp = Self.timestamp(now)
-        var copies = [Write]()
+        // Files that must not exist yet: the backup and the copies. Written without overwriting.
+        var newFiles = [Write]()
+        var copies = [URL]()
+        var reserved = Set<String>()
+        func copyURL(for url: URL) -> URL {
+            let base = url.path + ".basalt-replaced-\(stamp)"
+            var candidate = base
+            var number = 2
+            while reserved.contains(candidate) || pathExists(candidate) {
+                candidate = "\(base)-\(number)"
+                number += 1
+            }
+            reserved.insert(candidate)
+            return URL(fileURLWithPath: candidate)
+        }
 
         for dll in normalizedTargets {
             try validateOpenCompositeTarget(dll, prefix: prefix)
@@ -292,8 +319,9 @@ extension BottleManager {
             var backupPath: String?
             var targetCopies = [String]()
             func keepCopy(of url: URL, data: Data) {
-                let copy = URL(fileURLWithPath: url.path + ".basalt-replaced-\(stamp)")
-                copies.append(Write(url: copy, data: data))
+                let copy = copyURL(for: url)
+                newFiles.append(Write(url: copy, data: data))
+                copies.append(copy)
                 targetCopies.append(copy.path)
             }
 
@@ -312,7 +340,15 @@ extension BottleManager {
                             "\(dll.path) is \(PEImage.describe(machine: gameMachine)), but the local OpenComposite build is \(PEImage.describe(machine: machine)). This game needs a matching OpenComposite build.")
                     }
                     if backupBytes == nil {
-                        writes.append(Write(url: backup, data: current))
+                        // Any x64 DLL could be Valve's or someone's own OpenComposite, so even
+                        // the first replacement needs permission.
+                        guard !pathExists(backup.path) else {
+                            throw BottleToolError(
+                                "Basalt cannot read \(backup.path), so it will not replace \(dll.lastPathComponent).")
+                        }
+                        custom.append(dll)
+                        keepCopy(of: dll, data: current)
+                        newFiles.append(Write(url: backup, data: current))
                         backupPath = backup.path
                     } else if current != backupBytes {
                         custom.append(dll)
@@ -363,10 +399,19 @@ extension BottleManager {
             added += change.added
             removed += change.removed
         }
+        // The exact original survives a repeat only while nobody edited the arguments since.
+        var originalArguments: [String]? = profile.arguments
+        if let existing {
+            originalArguments = existing.installedArguments == profile.arguments
+                ? existing.originalArguments : nil
+        }
 
         let transaction = FileTransaction(fileManager: fileManager)
         do {
-            for write in copies + writes {
+            for write in newFiles {
+                try transaction.create(write.data, at: write.url)
+            }
+            for write in writes {
                 try transaction.write(write.data, to: write.url)
             }
             if updatedProfile != profile {
@@ -376,7 +421,8 @@ extension BottleManager {
             let record = VRSetupRecord(
                 formatVersion: VRSetupRecord.currentFormatVersion, profileName: profileName,
                 bottleName: profile.bottleName, kind: kind, preparedAt: now,
-                targets: recordTargets, addedArguments: added, removedArguments: removed)
+                targets: recordTargets, addedArguments: added, removedArguments: removed,
+                originalArguments: originalArguments, installedArguments: updatedProfile.arguments)
             try fileManager.createDirectory(at: paths.vrSetups, withIntermediateDirectories: true)
             try transaction.write(encoder.encode(record), to: paths.vrSetupFile(profileName))
             let status = vrSetupStatus(profileName: profileName, now: now)
@@ -385,14 +431,15 @@ extension BottleManager {
             }
             return VRPrepareResult(
                 kind: kind, targets: normalizedTargets,
-                replacedCopies: copies.map(\.url), status: status)
+                replacedCopies: copies, status: status)
         } catch {
             transaction.rollBack()
             throw error
         }
     }
 
-    /// Removes hello_xr test flags and `-vulkan`, and adds `-vr -dx11` when missing.
+    /// Removes hello_xr test flags (each with a value hello_xr knows) and `-vulkan`, and adds
+    /// `-vr -dx11` when missing.
     static func alyxArguments(_ arguments: [String])
         -> (arguments: [String], added: [String], removed: [String]) {
         let helloXRFlags: [Set<String>: Set<String>] = [
@@ -400,6 +447,8 @@ extension BottleManager {
             ["-ff", "--formfactor"]: ["hmd", "handheld"],
             ["-vc", "--viewconfig"]: ["stereo", "mono"],
             ["-bm", "--blendmode"]: ["opaque", "additive", "alphablend"],
+            ["-s", "--space"]: ["view", "local", "stage", "stageleft", "stageright",
+                                "stageleftrotated", "stagerightrotated"],
         ]
         var result = [String]()
         var removed = [String]()
@@ -480,16 +529,21 @@ extension BottleManager {
     // MARK: Restore
 
     /// Puts the game's own files back and removes what Basalt installed. Files that changed after
-    /// setup are left alone and reported. Custom-file copies are kept.
+    /// setup are left alone and reported. Custom-file copies are kept. When a target's
+    /// `openvr_api.dll.basalt-original` is gone, that target keeps its whole setup (DLL, proxied
+    /// OpenComposite, ini), the record keeps it, and the launch arguments stay, so the game still
+    /// has a working setup and Restore can run again once the original is back.
     @discardableResult
     public func restoreVR(profileName: String) throws -> VRRestoreReport {
-        guard let record = try loadVRSetupRecord(profileName) else {
+        guard var record = try loadVRSetupRecord(profileName) else {
             throw BottleToolError("'\(profileName)' has no VR setup to restore.")
         }
         let bottle = try loadBottle(record.bottleName)
         let prefix = URL(fileURLWithPath: bottle.prefixPath, isDirectory: true)
         var restored = [URL]()
         var kept = [URL]()
+        var unrestored = [URL]()
+        var remaining = [VRSetupRecord.Target]()
         let transaction = FileTransaction(fileManager: fileManager)
         do {
             for target in record.targets {
@@ -511,14 +565,22 @@ extension BottleManager {
                     throw BottleToolError("\(url.path) is a symbolic link. Basalt will not change it.")
                 }
                 let backupBytes = target.backup.flatMap { try? Data(contentsOf: URL(fileURLWithPath: $0)) }
+                let installedDLL = target.files.first { $0.path == dll.path }
+                if target.backup != nil, backupBytes == nil, let installedDLL,
+                   let current = try? Data(contentsOf: dll), Self.sha256(current) == installedDLL.sha256 {
+                    // The game's own DLL is gone. Removing Basalt's, or the files it needs,
+                    // would leave the game with a broken setup.
+                    unrestored.append(dll)
+                    kept += target.files.map { URL(fileURLWithPath: $0.path) }
+                        .filter { fileManager.fileExists(atPath: $0.path) }
+                    remaining.append(target)
+                    continue
+                }
                 for file in target.files {
                     let url = URL(fileURLWithPath: file.path)
                     guard let current = try? Data(contentsOf: url) else { continue }
                     if Self.sha256(current) == file.sha256 {
-                        if url == dll, target.backup != nil, backupBytes == nil {
-                            // The game's own DLL is gone; removing Basalt's would leave none.
-                            kept.append(url)
-                        } else if url == dll, let backupBytes {
+                        if url == dll, let backupBytes {
                             try transaction.write(backupBytes, to: dll)
                             try transaction.remove(backup)
                         } else {
@@ -534,24 +596,38 @@ extension BottleManager {
                     }
                 }
             }
-            if !record.addedArguments.isEmpty || !record.removedArguments.isEmpty,
-               var profile = try? loadProfile(profileName) {
-                var arguments = profile.arguments
-                for flag in record.addedArguments {
-                    if let index = arguments.firstIndex(of: flag) { arguments.remove(at: index) }
+            if remaining.isEmpty {
+                if var profile = try? loadProfile(profileName) {
+                    let arguments = Self.restoredArguments(profile.arguments, record: record)
+                    if arguments != profile.arguments {
+                        profile.arguments = arguments
+                        try transaction.write(encoder.encode(profile), to: paths.profileFile(profileName))
+                    }
                 }
-                arguments += record.removedArguments
-                if arguments != profile.arguments {
-                    profile.arguments = arguments
-                    try transaction.write(encoder.encode(profile), to: paths.profileFile(profileName))
-                }
+                try transaction.remove(paths.vrSetupFile(profileName))
+            } else {
+                record.targets = remaining
+                try transaction.write(encoder.encode(record), to: paths.vrSetupFile(profileName))
             }
-            try transaction.remove(paths.vrSetupFile(profileName))
         } catch {
             transaction.rollBack()
             throw error
         }
-        return VRRestoreReport(restored: restored, kept: kept)
+        return VRRestoreReport(restored: restored, kept: kept, unrestored: unrestored)
+    }
+
+    /// The exact arguments from before setup while the profile still has the ones setup left;
+    /// otherwise the user's current arguments without `addedArguments`, with
+    /// `removedArguments` (flags still next to their values) at the end.
+    static func restoredArguments(_ current: [String], record: VRSetupRecord) -> [String] {
+        if let original = record.originalArguments, current == record.installedArguments {
+            return original
+        }
+        var arguments = current
+        for flag in record.addedArguments {
+            if let index = arguments.firstIndex(of: flag) { arguments.remove(at: index) }
+        }
+        return arguments + record.removedArguments
     }
 
     // MARK: Helpers
@@ -578,7 +654,9 @@ extension BottleManager {
     }
 
     /// `url` is below `prefix/drive_c`, and so is every existing folder on its path after
-    /// symbolic links are resolved.
+    /// symbolic links are resolved. A folder on the path may be a link that stays inside
+    /// drive_c; Prepare and Restore separately refuse files that are links themselves, and
+    /// create backups and copies only where nothing exists yet.
     func requireInsideDriveC(_ url: URL, prefix: URL, what: String) throws {
         let driveC = prefix.standardizedFileURL.appendingPathComponent("drive_c").path
         let candidate = url.standardizedFileURL
@@ -608,6 +686,11 @@ extension BottleManager {
                                      isDirectory: &isDirectory), isDirectory.boolValue else {
             throw BottleToolError("The folder of \(dll.path) does not exist")
         }
+    }
+
+    /// Something is at `path`, even a link to nothing.
+    func pathExists(_ path: String) -> Bool {
+        (try? fileManager.attributesOfItem(atPath: path)) != nil
     }
 
     func isSymbolicLink(_ url: URL) -> Bool {
@@ -646,6 +729,13 @@ final class FileTransaction {
         remember(url)
         if (try? Data(contentsOf: url)) == data { return }
         try data.write(to: url, options: .atomic)
+    }
+
+    /// Writes a file that must not exist yet. Fails, without touching it, if anything is
+    /// already at `url`, including a link or a folder.
+    func create(_ data: Data, at url: URL) throws {
+        try data.write(to: url, options: .withoutOverwriting)
+        if seen.insert(url.path).inserted { originals.append((url, nil)) }
     }
 
     func remove(_ url: URL) throws {
