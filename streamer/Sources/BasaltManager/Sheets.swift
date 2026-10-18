@@ -64,6 +64,15 @@ struct ProfileEditorSheet: View {
     @State private var confirmingDelete = false
     @State private var preparingVR = false
 
+    private var hasUnsavedChanges: Bool {
+        let current = model.profiles.first { $0.name == profile.name } ?? profile
+        return source != current.source || executable != current.executable
+            || workingDirectory != (current.workingDirectory ?? "")
+            || arguments != current.arguments.joined(separator: "\n")
+            || environment != current.environment.sorted { $0.key < $1.key }
+                .map { "\($0.key)=\($0.value)" }.joined(separator: "\n")
+    }
+
     init(profile: LaunchProfile, model: BasaltAppModel) {
         self.profile = profile
         self.model = model
@@ -121,6 +130,8 @@ struct ProfileEditorSheet: View {
                         VRStatusLabel(status: model.vrStatuses[profile.name] ?? .notPrepared)
                         Spacer(minLength: 12)
                         Button("Prepare VR…") { preparingVR = true }
+                            .disabled(hasUnsavedChanges)
+                            .help("Save profile changes before preparing VR")
                     }
                     HStack {
                         Text("Advanced: install an OpenComposite DLL you choose into a folder you choose.")
@@ -147,7 +158,11 @@ struct ProfileEditorSheet: View {
                 .disabled(executable.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         .frame(width: 640, height: 640)
-        .sheet(isPresented: $preparingVR) {
+        .sheet(isPresented: $preparingVR, onDismiss: {
+            if let current = model.profiles.first(where: { $0.name == profile.name }) {
+                arguments = current.arguments.joined(separator: "\n")
+            }
+        }) {
             PrepareVRSheet(profile: profile, model: model)
         }
         .confirmationDialog(
@@ -463,6 +478,7 @@ struct AddGameSheet: View {
                         Text("Choose the game's .exe in the bottle's drive_c folder.")
                             .formFooterStyle()
                     }
+                    .disabled(addedProfile != nil)
 
                     Section {
                         TextField("Name", text: $name, prompt: Text("Game name"))
