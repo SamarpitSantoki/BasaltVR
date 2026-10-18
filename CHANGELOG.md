@@ -132,6 +132,10 @@ before each session). The streamer reports a mismatched DLL instead of connectin
 
 ### Fixed
 
+- Sessions started from the Play page are now in the session history and have an app log
+  (`app-<profile>-<time>.log`), like sessions started from the Library or the Stream page.
+  Before, only `play.zsh`'s streamer, game, runtime, and Quest logs were kept
+  (`PlaySessionRecorder` and `AppSessionLog` in BasaltManagerKit).
 - The `hello-xr` profile no longer quits after about 10 s without a frame when started from the
   app or `scripts/play.zsh`. Khronos hello_xr quits at end of file on stdin, and the game got
   `/dev/null`. The game now gets an empty pipe as stdin that stays open until it exits
