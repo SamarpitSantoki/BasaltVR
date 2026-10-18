@@ -109,6 +109,16 @@ before each session). The streamer reports a mismatched DLL instead of connectin
   every Steam/game line rather than only the first line of each chunk.
 - Diagnostic reports no longer include audio device names (only BlackHole or another device) or
   `[U:1:…]` Steam IDs.
+- The OpenXR runtime now samples the head once per frame. For one `xrWaitFrame` display time,
+  the first `xrLocateViews` or `xrLocateSpace` pins the newest head sample, and every later head
+  query for that time returns the same pose. The frame goes to the streamer with that sample's
+  timestamp. Before, OpenComposite games (Half-Life: Alyx) located each frame several times, each
+  call got a newer sample (head poses arrive at about 216 Hz), and the last call set the frame's
+  timestamp. The game rendered with an older pose than the timestamp named, so ALVR reprojected
+  from the wrong pose and the world wobbled a little all the time. hello_xr locates once per
+  frame and was not affected. The runtime log prints a `head pose pinning:` line every 5 s: the
+  number of frames where a later head query saw a newer sample (these frames had the wrong
+  timestamp before this fix).
 - A slow game (The Lab's Secret Shop) or any hitch over 0.5 s no longer flickers between the game
   image and black.
 - Touch controller poses no longer carry the ALVR client's SteamVR-only grip offset (-15° pitch,

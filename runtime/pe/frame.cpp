@@ -36,6 +36,41 @@ size_t gEventHead = 0;
 size_t gEventCount = 0;
 uint32_t gLostEventCount = 0;
 
+// Periodic head-pinning diagnostic (see controlHeadPose). A nonzero
+// "diverged" count means the application located one frame's head more than
+// once while newer samples arrived; before pinning, those frames were tagged
+// with a pose newer than the one they rendered with.
+constexpr ULONGLONG kHeadStatsIntervalMs = 5000;
+ULONGLONG gNextHeadStatsTick = 0;
+uint64_t gLastPinnedHeadFrames = 0;
+uint64_t gLastDivergedHeadFrames = 0;
+
+struct HeadStatsLine {
+    uint64_t pinned;
+    uint64_t diverged;
+    uint64_t intervalPinned;
+    uint64_t intervalDiverged;
+};
+
+bool takeHeadStatsLineLocked(HeadStatsLine* line) {
+    const ULONGLONG now = GetTickCount64();
+    if (now < gNextHeadStatsTick) {
+        return false;
+    }
+    basalt::controlHeadSampleStats(&line->pinned, &line->diverged);
+    line->intervalPinned = line->pinned - gLastPinnedHeadFrames;
+    line->intervalDiverged = line->diverged - gLastDivergedHeadFrames;
+    if (line->intervalPinned == 0) {
+        // Nothing tracked yet (headless, or no head query): report as soon
+        // as there is.
+        return false;
+    }
+    gNextHeadStatsTick = now + kHeadStatsIntervalMs;
+    gLastPinnedHeadFrames = line->pinned;
+    gLastDivergedHeadFrames = line->diverged;
+    return true;
+}
+
 struct TimerApi {
     HANDLE timer = nullptr;
     BOOL(WINAPI* setTimer)(
@@ -818,7 +853,19 @@ XrResult XRAPI_CALL endFrame(
     }
     const uint64_t questTrackingTimestamp = haveProjection
         ? locatedViewsQuestTimestamp(session, frameEndInfo->displayTime) : 0;
+    HeadStatsLine headStats{};
+    const bool logHeadStats = takeHeadStatsLineLocked(&headStats);
     ReleaseSRWLockExclusive(&gLifecycleLock);
+    if (logHeadStats) {
+        basalt::runtimeLog(
+            "head pose pinning: %llu of %llu frames since the last report had a "
+            "later head query see a newer sample (pinned to the first); %llu of "
+            "%llu total",
+            static_cast<unsigned long long>(headStats.intervalDiverged),
+            static_cast<unsigned long long>(headStats.intervalPinned),
+            static_cast<unsigned long long>(headStats.diverged),
+            static_cast<unsigned long long>(headStats.pinned));
+    }
 
     // The streamer reads BGRA eye images and crops each by its rect. A frame
     // that already has that shape is exported zero-copy exactly as before;

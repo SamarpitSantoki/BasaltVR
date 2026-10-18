@@ -256,9 +256,12 @@ recovers tracking. ALVR control disconnect atomically resets all retained input.
 spaces retain their backing resources when public action handles are destroyed. Calibrated Quest
 IPD and asymmetric per-eye FOV now drive `xrLocateViews`; the headset visual gate renders a LOCAL-fixed depth
 constellation and a physically scaled controller marker to expose stereo/head-tracking errors.
-Each submitted frame also carries the exact Quest tracking timestamp consumed by its successful
-`xrLocateViews` call through the control daemon and VideoToolbox to ALVR, preventing the client
-from applying a newer or older pose to that rendered image.
+Each submitted frame also carries the exact Quest tracking timestamp of the head sample it was
+rendered with through the control daemon and VideoToolbox to ALVR, preventing the client from
+applying a newer or older pose to that rendered image. For each `xrWaitFrame` display time, the
+first `xrLocateViews` or `xrLocateSpace` pins the newest head sample, and every later head query
+for that time returns it, so an app that locates one frame several times (OpenComposite does)
+renders and tags the frame with one sample.
 The swapchain API accepts `arraySize=2` texture arrays. Because the native handoff consumes one
 IOSurface per eye, the array stays private to the game's device and each submitted slice is copied
 into its own IOSurface-backed 2D texture. The DXMT fork still reports render-target-array indexing

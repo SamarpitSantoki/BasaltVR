@@ -92,6 +92,11 @@ typedef struct {
 static RecordedHaptic g_haptics[MAX_RECORDED_HAPTICS];
 static bool g_refresh_tracking = false;
 static bool g_head_turned = false;
+/* The 0.875 haptic marker raises the head 0.25 m under a newer timestamp
+ * (3). The frame the smoke had already located must still carry the
+ * timestamp of the sample it rendered with (2); later frames carry 3. */
+static bool g_head_raised = false;
+static bool g_expect_pinned_frame = false;
 static unsigned int g_frame_delay_ms = 0;
 static unsigned int g_view_width = 0;
 static unsigned int g_view_height = 0;
@@ -162,7 +167,12 @@ static bool send_head_pose(int fd, uint64_t timestamp) {
         0.0f, 1.0f, 0.0f, 0.0f,
         0.5f, 1.5f, -0.25f,
     };
-    const float* pose = g_head_turned ? turned_pose : initial_pose;
+    float pose[7];
+    memcpy(pose, g_head_turned ? turned_pose : initial_pose, sizeof(pose));
+    if (g_head_raised) {
+        pose[5] += 0.25f;
+        timestamp = 3;
+    }
     memcpy(payload, &timestamp, sizeof(timestamp));
     memcpy(payload + sizeof(timestamp), pose, 7 * sizeof(float));
     return send_message(fd, BASALT_MSG_HEAD_POSE, payload, sizeof(payload));
@@ -310,6 +320,11 @@ static bool handle_haptic(int fd, const uint8_t* payload, size_t length) {
         ++g_hand_untracks_sent;
         return send_hand_skeleton(fd, 6, 0, false) &&
                send_hand_skeleton(fd, 5, 0, true);  // stale: must be ignored
+    }
+    if (duration != 0 && __builtin_fabsf(amplitude - 0.875f) < 0.0001f) {
+        g_head_raised = true;
+        g_expect_pinned_frame = true;
+        return send_head_pose(fd, 3);
     }
     // Hold the right system click while publishing a turned head pose. This
     // deterministically exercises the runtime's Quest reset-view gesture and
@@ -746,15 +761,22 @@ static bool handle_frame_ready(int fd, const uint8_t* payload, size_t length) {
         fprintf(stderr, "FAIL: FrameReady view count %u / length %zu\n", view_count, length);
         return false;
     }
-    if (tracking_timestamp != 2) {
+    // Every frame carries the head sample timestamp it was rendered with:
+    // 2 until the raise marker, then 3, except the one frame the smoke had
+    // already located before the raised sample arrived.
+    const uint64_t expected_tracking_timestamp =
+        g_head_raised && !g_expect_pinned_frame ? 3 : 2;
+    g_expect_pinned_frame = false;
+    if (tracking_timestamp != expected_tracking_timestamp) {
         const float first_x = view_count > 0 ? read_f32(payload + 28 + 48) : 0.0f;
         const float first_y = view_count > 0 ? read_f32(payload + 28 + 52) : 0.0f;
         const float first_z = view_count > 0 ? read_f32(payload + 28 + 56) : 0.0f;
         fprintf(stderr,
                 "FAIL: FrameReady carried tracking timestamp %" PRIu64
-                ", expected the xrLocateViews sample timestamp 2 "
+                ", expected the xrLocateViews sample timestamp %" PRIu64 " "
                 "(first-eye position %.4f %.4f %.4f)\n",
-                tracking_timestamp, first_x, first_y, first_z);
+                tracking_timestamp, expected_tracking_timestamp,
+                first_x, first_y, first_z);
         return false;
     }
     if (frame_number <= g_last_frame_number) {
@@ -795,6 +817,8 @@ static bool handle_frame_ready(int fd, const uint8_t* payload, size_t length) {
             }
         }
         const float expected_x = i == 0 ? -0.032f : 0.032f;
+        /* The raised sample (timestamp 3) is 0.25 m higher. */
+        const float expected_y = expected_tracking_timestamp == 3 ? 1.75f : 1.5f;
         const float expected_z = 0.0f;
         const float orientation_y = read_f32(view + 36);
         const float orientation_w = read_f32(view + 44);
@@ -804,7 +828,7 @@ static bool handle_frame_ready(int fd, const uint8_t* payload, size_t length) {
         if (__builtin_fabsf(orientation_y) > 0.0001f ||
             __builtin_fabsf(orientation_w - 1.0f) > 0.0001f ||
             __builtin_fabsf(position_x - expected_x) > 0.0001f ||
-            __builtin_fabsf(position_y - 1.5f) > 0.0001f ||
+            __builtin_fabsf(position_y - expected_y) > 0.0001f ||
             __builtin_fabsf(position_z - expected_z) > 0.0001f) {
             fprintf(stderr,
                     "FAIL: FrameReady view %u did not carry injected head pose "
@@ -1106,9 +1130,9 @@ int main(int argc, char** argv) {
         return 0;
     }
     // 6 smoke haptics plus 11 OpenComposite-shaped values the runtime must
-    // normalize and deliver rather than reject, plus the two hand-tracking
-    // markers when enabled.
-    const uint64_t expected_haptics = g_hand_tracking ? 19 : 17;
+    // normalize and deliver rather than reject, the head-raise marker, plus
+    // the two hand-tracking markers when enabled.
+    const uint64_t expected_haptics = g_hand_tracking ? 20 : 18;
     if (g_haptics_received != expected_haptics) {
         fprintf(stderr,
                 "FAIL: received %" PRIu64 " haptic commands, expected exactly %" PRIu64 "\n",
@@ -1129,6 +1153,12 @@ int main(int argc, char** argv) {
     if (!verify_open_composite_haptics()) {
         return 1;
     }
+    if (!g_head_raised || g_expect_pinned_frame) {
+        fprintf(stderr, "FAIL: the head-raise marker frame was never verified\n");
+        return 1;
+    }
+    printf("PASS: a frame located before a newer head sample kept its rendered "
+           "tracking timestamp\n");
     printf("PASS: control daemon validated hello, swapchains, %" PRIu64
            " frames, and %" PRIu64 " haptic commands%s%s\n",
            g_frames_received, g_haptics_received,
