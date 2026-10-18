@@ -119,6 +119,12 @@ before each session). The streamer reports a mismatched DLL instead of connectin
 
 ### Fixed
 
+- The `hello-xr` profile no longer quits after about 10 s without a frame when started from the
+  app or `scripts/play.zsh`. Khronos hello_xr quits at end of file on stdin, and the game got
+  `/dev/null`. The game now gets an empty pipe as stdin that stays open until it exits
+  (`HeldOpenStandardInput` in BasaltBottleKit, used by app sessions and `basaltctl run`).
+- The streamer prints the Screen Recording hint only after a screen-capture error, not after every
+  fatal error (an adb error got it too).
 - `~/Library/Logs/BasaltVR` no longer grows without end (351 MB in two days). The Quest log
   starts at the session start (`adb logcat -T 1`) instead of with the old lines in the Quest's
   buffer (up to 70% of the file), and silences `VideoRenderQualityTracker` (about 1/3 of all

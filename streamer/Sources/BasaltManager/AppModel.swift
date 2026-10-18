@@ -769,7 +769,8 @@ final class BasaltAppModel: ObservableObject {
                     self.followGame(matcher, launchedWith: command)
                 }
             }
-            try game.run()
+            // Replaces attachOutput's /dev/null stdin: hello_xr quits at its EOF.
+            try HeldOpenStandardInput.run(game)
             gameProcess = game
             gameIsSteamClient = SteamSessionPlan.launchesSteamClient(profile)
             activeWineCommand = command

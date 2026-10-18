@@ -146,9 +146,21 @@ public protocol BottleCommandRunning: Sendable {
     /// Like `run`, but terminates the command after `timeout` seconds.
     func run(executable: URL, arguments: [String], environment: [String: String],
              currentDirectory: URL?, timeout: TimeInterval) throws -> CommandOutput
+    /// Like `run`, for a game: the child gets an empty stdin that stays open until it
+    /// exits (see `HeldOpenStandardInput`), not the caller's stdin.
+    func runKeepingInputOpen(executable: URL, arguments: [String],
+                             environment: [String: String],
+                             currentDirectory: URL?) throws -> CommandOutput
 }
 
 extension BottleCommandRunning {
+    public func runKeepingInputOpen(executable: URL, arguments: [String],
+                                    environment: [String: String],
+                                    currentDirectory: URL?) throws -> CommandOutput {
+        try run(executable: executable, arguments: arguments,
+                environment: environment, currentDirectory: currentDirectory)
+    }
+
     public func run(executable: URL, arguments: [String], environment: [String: String],
                     currentDirectory: URL?, timeout: TimeInterval) throws -> CommandOutput {
         try run(executable: executable, arguments: arguments,
@@ -173,9 +185,17 @@ public struct ProcessBottleCommandRunner: BottleCommandRunning {
                     currentDirectory: currentDirectory, timeout: timeout)
     }
 
+    public func runKeepingInputOpen(executable: URL, arguments: [String],
+                                    environment: [String: String],
+                                    currentDirectory: URL?) throws -> CommandOutput {
+        try execute(executable: executable, arguments: arguments, environment: environment,
+                    currentDirectory: currentDirectory, timeout: nil, keepsInputOpen: true)
+    }
+
     private func execute(executable: URL, arguments: [String],
                          environment: [String: String], currentDirectory: URL?,
-                         timeout: TimeInterval?) throws -> CommandOutput {
+                         timeout: TimeInterval?,
+                         keepsInputOpen: Bool = false) throws -> CommandOutput {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
@@ -205,8 +225,13 @@ public struct ProcessBottleCommandRunner: BottleCommandRunning {
         defer { try? outputHandle.close() }
         process.standardOutput = outputHandle
         process.standardError = outputHandle
+        var input: HeldOpenStandardInput?
         do {
-            try process.run()
+            if keepsInputOpen {
+                input = try HeldOpenStandardInput.run(process)
+            } else {
+                try process.run()
+            }
         } catch {
             throw BottleToolError("Could not run \(executable.path): \(error.localizedDescription)")
         }
@@ -218,6 +243,7 @@ public struct ProcessBottleCommandRunner: BottleCommandRunning {
             if process.isRunning { process.terminate() }
         }
         process.waitUntilExit()
+        input?.close()
         try? outputHandle.synchronize()
         let data = (try? Data(contentsOf: outputURL)) ?? Data()
         return CommandOutput(
@@ -973,7 +999,9 @@ public final class BottleManager: @unchecked Sendable {
         let command = try profileLaunchCommand(
             name, controlFile: controlFile,
             additionalArguments: additionalArguments)
-        return try runner.run(
+        // Not the caller's stdin: play.zsh gives basaltctl /dev/null, and hello_xr quits
+        // at end of file on stdin.
+        return try runner.runKeepingInputOpen(
             executable: command.executable,
             arguments: command.arguments,
             environment: command.environment,
