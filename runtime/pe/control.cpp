@@ -139,6 +139,30 @@ XrTime gLocalSpaceChangeTime = 0;
 // recenter must not take effect at or before it: the application may already
 // have located part of that frame against the previous LOCAL definition.
 XrTime gLatestPredictedDisplayTime = 0;
+// One head sample per xrWaitFrame predictedDisplayTime. The first head query
+// for a predicted time pins the newest sample; every later xrLocateViews or
+// xrLocateSpace for that time returns the same pose and Quest timestamp, and
+// the frame is tagged with that timestamp. ALVR reprojects from the pose the
+// timestamp names, so it must be the pose the application rendered with.
+// OpenComposite locates each frame several times (projection views, eye
+// transforms, IPD, then the game's WaitGetPoses); head samples arrive at
+// about 216 Hz, so unpinned calls each saw a newer sample.
+struct FrameHeadSample {
+    XrTime displayTime = 0;
+    bool sampled = false;
+    bool diverged = false;
+    uint64_t questTimestamp = 0;
+    XrPosef rawHeadPose{};
+};
+// Covers the frames an application may have between xrWaitFrame and
+// xrEndFrame (kPendingFrameCapacity) with room to spare.
+constexpr size_t kFrameHeadSampleCapacity = 8;
+FrameHeadSample gFrameHeadSamples[kFrameHeadSampleCapacity]{};
+size_t gNextFrameHeadSample = 0;
+// Diagnostics, cumulative for the process: frames that pinned a head sample,
+// and those where a later query would have seen a newer sample unpinned.
+uint64_t gPinnedHeadFrames = 0;
+uint64_t gDivergedHeadFrames = 0;
 // Nonzero while the right system button is held; the recenter gesture fires
 // once per hold.
 XrTime gSystemButtonPressTime = 0;
@@ -194,6 +218,10 @@ void resetTrackingStateLocked() {
     gPreviousLocalFromQuest = gLocalFromQuest;
     gLocalSpaceChangeTime = 0;
     gLatestPredictedDisplayTime = 0;
+    for (FrameHeadSample& sample : gFrameHeadSamples) {
+        sample = {};
+    }
+    gNextFrameHeadSample = 0;
     resetInputsLocked();
     gViewConfigValid = false;
     gViewConfigIpdMeters = 0.0f;
@@ -257,6 +285,20 @@ const XrPosef& localTransformForTimeLocked(XrTime locateTime) {
                    locateTime < gLocalSpaceChangeTime
         ? gPreviousLocalFromQuest
         : gLocalFromQuest;
+}
+
+// The pinning slot for a predictedDisplayTime xrWaitFrame returned, or null
+// for any other time (those keep seeing the newest sample).
+FrameHeadSample* findFrameHeadSampleLocked(XrTime displayTime) {
+    if (displayTime <= 0) {
+        return nullptr;
+    }
+    for (FrameHeadSample& sample : gFrameHeadSamples) {
+        if (sample.displayTime == displayTime) {
+            return &sample;
+        }
+    }
+    return nullptr;
 }
 
 void recenterLocalOriginLocked(
@@ -1442,6 +1484,10 @@ void controlNotePredictedDisplayTime(XrSession session, XrTime predictedDisplayT
     if (session != XR_NULL_HANDLE && gControlSession == session &&
         predictedDisplayTime > gLatestPredictedDisplayTime) {
         gLatestPredictedDisplayTime = predictedDisplayTime;
+        FrameHeadSample& slot = gFrameHeadSamples[gNextFrameHeadSample];
+        slot = {};
+        slot.displayTime = predictedDisplayTime;
+        gNextFrameHeadSample = (gNextFrameHeadSample + 1) % kFrameHeadSampleCapacity;
     }
     ReleaseSRWLockExclusive(&gControlLock);
 }
@@ -1481,23 +1527,63 @@ bool controlHeadPose(
     uint64_t* questTimestampNanoseconds,
     XrPosef* poseInLocal) {
     const XrTime now = monotonicTime();
-    AcquireSRWLockShared(&gControlLock);
+    // Exclusive: the first query for a predicted display time pins its sample.
+    AcquireSRWLockExclusive(&gControlLock);
     const bool fresh = session != XR_NULL_HANDLE && gControlSession == session &&
                        gSocket != INVALID_SOCKET && !gReceiverFailed &&
                        gHeadPoseValid && gHeadPoseArrival > 0 &&
                        now >= gHeadPoseArrival &&
                        now - gHeadPoseArrival <= kHeadPoseFreshness;
     if (fresh) {
+        uint64_t questTimestamp = gHeadPoseQuestTimestamp;
+        XrPosef rawHeadPose = gRawHeadPose;
+        FrameHeadSample* pinned = findFrameHeadSampleLocked(locateTime);
+        if (pinned != nullptr && !pinned->sampled) {
+            pinned->sampled = true;
+            pinned->questTimestamp = questTimestamp;
+            pinned->rawHeadPose = rawHeadPose;
+            ++gPinnedHeadFrames;
+        } else if (pinned != nullptr) {
+            if (!pinned->diverged && pinned->questTimestamp != questTimestamp) {
+                pinned->diverged = true;
+                ++gDivergedHeadFrames;
+            }
+            questTimestamp = pinned->questTimestamp;
+            rawHeadPose = pinned->rawHeadPose;
+        }
         if (questTimestampNanoseconds != nullptr) {
-            *questTimestampNanoseconds = gHeadPoseQuestTimestamp;
+            *questTimestampNanoseconds = questTimestamp;
         }
         if (poseInLocal != nullptr) {
             *poseInLocal = poseCompose(
-                localTransformForTimeLocked(locateTime), gRawHeadPose);
+                localTransformForTimeLocked(locateTime), rawHeadPose);
         }
     }
-    ReleaseSRWLockShared(&gControlLock);
+    ReleaseSRWLockExclusive(&gControlLock);
     return fresh;
+}
+
+bool controlPinnedHeadTimestamp(
+    XrSession session,
+    XrTime displayTime,
+    uint64_t* questTimestampNanoseconds) {
+    AcquireSRWLockShared(&gControlLock);
+    const FrameHeadSample* pinned = session != XR_NULL_HANDLE &&
+                                            gControlSession == session
+        ? findFrameHeadSampleLocked(displayTime) : nullptr;
+    const bool found = pinned != nullptr && pinned->sampled;
+    if (found && questTimestampNanoseconds != nullptr) {
+        *questTimestampNanoseconds = pinned->questTimestamp;
+    }
+    ReleaseSRWLockShared(&gControlLock);
+    return found;
+}
+
+void controlHeadSampleStats(uint64_t* pinnedFrames, uint64_t* divergedFrames) {
+    AcquireSRWLockShared(&gControlLock);
+    *pinnedFrames = gPinnedHeadFrames;
+    *divergedFrames = gDivergedHeadFrames;
+    ReleaseSRWLockShared(&gControlLock);
 }
 
 bool controlInputSnapshot(
