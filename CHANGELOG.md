@@ -63,6 +63,12 @@ All notable changes to BasaltVR are documented here.
   every Steam/game line rather than only the first line of each chunk.
 - Diagnostic reports no longer include audio device names (only BlackHole or another device) or
   `[U:1:…]` Steam IDs.
+- The `hello-xr` profile no longer quits after about 10 s without a frame when started from the
+  app. Khronos hello_xr quits at end of file on stdin, and the game got `/dev/null`. The game now
+  gets an empty pipe as stdin that stays open until it exits (`HeldOpenStandardInput` in
+  BasaltBottleKit, used by app sessions and `basaltctl run`).
+- The streamer prints the Screen Recording hint only after a screen-capture error, not after every
+  fatal error (an adb error got it too).
 - Open BSManager now launches with `start /wait`. A bare `start` exited immediately, and the
   utility exit handler then stopped every Wine process in the bottle, closing BSManager before its
   window appeared.

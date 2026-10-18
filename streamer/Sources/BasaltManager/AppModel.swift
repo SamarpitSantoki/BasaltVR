@@ -738,7 +738,8 @@ final class BasaltAppModel: ObservableObject {
                     self.stop()
                 }
             }
-            try game.run()
+            // Replaces attachOutput's /dev/null stdin: hello_xr quits at its EOF.
+            try HeldOpenStandardInput.run(game)
             gameProcess = game
             activeWineCommand = command
             activeLaunchID = nil
