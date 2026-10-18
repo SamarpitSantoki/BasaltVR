@@ -757,6 +757,12 @@ struct BasaltStreamerApp {
                 + options.codec.displayName)
             // The runtime paces xrWaitFrame to the rate the Quest displays,
             // not to the requested --fps, so a 90 Hz headset gets 90 Hz frames.
+            // A write in flight only blocks the next frame once it has run
+            // longer than one display period; shorter writes finish long
+            // before the next frame is encoded.
+            if !videoSender.setInFlightBusyThreshold(refreshRate: negotiated.refreshRate) {
+                videoSender.setInFlightBusyThreshold(refreshRate: Float(options.fps))
+            }
             if let runtimeLink, runtimeLink.setDisplayRefreshRate(negotiated.refreshRate) {
                 print("  OpenXR frame pacing: "
                     + String(format: "%.0f Hz", negotiated.refreshRate)
@@ -765,6 +771,7 @@ struct BasaltStreamerApp {
             }
         } else {
             print("  headset did not provide streaming capabilities")
+            videoSender.setInFlightBusyThreshold(refreshRate: Float(options.fps))
         }
         handshake.onRequestIDR { videoRecovery.clientRequestedIDR() }
         handshake.onViewsConfig { config in
