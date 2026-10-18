@@ -30,6 +30,12 @@ final class PlayController: ObservableObject {
     private var lastError: String?
     private var stopWaiters = [() -> Void]()
     private var checkingQuest = false
+    /// The running session's history record and its app log
+    /// (`app-<profile>-<time>.log`), like a Stream page session.
+    private var recorder: PlaySessionRecorder?
+    private var sessionLog: FileHandle?
+    /// Receives the saved history after a Play session is recorded.
+    var onHistoryChanged: (([SessionRecord]) -> Void)?
     private static let optionsKey = "BasaltVR.playOptions.v1"
     private static let selectedGameKey = "BasaltVR.playSelectedGame"
 
@@ -71,6 +77,9 @@ final class PlayController: ObservableObject {
         let plan = PlayLaunchPlan.make(
             profile: game.profileName, options: options, tools: tools,
             dataRoot: dataRoot, parentPID: getpid())
+        recorder = PlaySessionRecorder(profileName: game.profileName, options: options)
+        try? sessionLog?.close()
+        sessionLog = AppSessionLog.open(profileName: game.profileName)
         appendLog("$ play.zsh \(plan.arguments.dropFirst().joined(separator: " "))")
         let runner = PlaySessionRunner(plan: plan) { [weak self] output in
             DispatchQueue.main.async {
@@ -83,6 +92,7 @@ final class PlayController: ObservableObject {
         } catch {
             progress.finish(exitStatus: 1, lastError: error.localizedDescription)
             appendLog("Could not start play.zsh: \(error.localizedDescription)")
+            finishSession(exitStatus: 1, lastError: error.localizedDescription)
         }
     }
 
@@ -94,6 +104,7 @@ final class PlayController: ObservableObject {
         }
         if let completion { stopWaiters.append(completion) }
         progress.requestStop()
+        recorder?.requestStop()
         runner.stop()
     }
 
@@ -107,10 +118,13 @@ final class PlayController: ObservableObject {
             }
         case .event(let event):
             progress.apply(event)
+            recorder?.apply(event)
+            if case .fail(let reason) = event { appendLog("Failed: \(reason.message)") }
             if case .connection = event { refreshQuestSoon() }
         case .streamerLine(let line):
             stats.apply(streamerLine: line)
             progress.apply(streamerLine: line)
+            recorder?.apply(streamerLine: line)
             if line.contains("ALVR headset disconnected") || line.contains("ALVR headset reconnected")
                 || line.lowercased().hasPrefix("error:") {
                 appendLog("streamer: " + line)
@@ -118,6 +132,7 @@ final class PlayController: ObservableObject {
         case .exited(let status):
             progress.finish(exitStatus: status, lastError: lastError)
             appendLog("play.zsh exited with status \(status)")
+            finishSession(exitStatus: status, lastError: lastError)
             runner = nil
             let waiters = stopWaiters
             stopWaiters = []
@@ -129,6 +144,26 @@ final class PlayController: ObservableObject {
     private func appendLog(_ line: String) {
         logLines.append(line)
         if logLines.count > 400 { logLines.removeFirst(logLines.count - 400) }
+        try? sessionLog?.write(contentsOf: Data((line + "\n").utf8))
+    }
+
+    /// Saves the session to history and closes its app log.
+    private func finishSession(exitStatus: Int32, lastError: String?) {
+        defer {
+            try? sessionLog?.close()
+            sessionLog = nil
+        }
+        guard let finished = recorder?.finish(exitStatus: exitStatus, lastError: lastError) else {
+            recorder = nil
+            return
+        }
+        recorder = nil
+        guard let dataRoot else { return }
+        do {
+            onHistoryChanged?(try SessionHistoryStore(dataRoot: dataRoot).append(finished))
+        } catch {
+            appendLog("Could not save session history: \(error.localizedDescription)")
+        }
     }
 
     // MARK: Quest status and fixes
