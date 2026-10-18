@@ -196,6 +196,7 @@ final class BasaltAppModel: ObservableObject {
                 appExecutableDirectory: Bundle.main.executableURL?.deletingLastPathComponent()),
             dataRoot: selectedRoot)
         sessionHistory = SessionHistoryStore(dataRoot: selectedRoot).load()
+        play.onHistoryChanged = { [weak self] in self?.sessionHistory = $0 }
         alertMessage = startupError
         Task { await refresh() }
     }
@@ -970,18 +971,7 @@ final class BasaltAppModel: ObservableObject {
 
     private func openSessionLog(named name: String) {
         closeSessionLog()
-        let directory = PlayTools.logsDirectory()
-        // Same 7-day rule as play.zsh (scripts/log-retention.zsh).
-        LogRetention.pruneOldLogs(in: directory)
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
-        let file = directory.appendingPathComponent(
-            "app-\(sanitizedProfileName(name))-\(formatter.string(from: Date())).log")
-        try? FileManager.default.createDirectory(
-            at: directory, withIntermediateDirectories: true)
-        guard FileManager.default.createFile(atPath: file.path, contents: nil) else { return }
-        sessionLog = try? FileHandle(forWritingTo: file)
+        sessionLog = AppSessionLog.open(profileName: name)
     }
 
     private func closeSessionLog() {
