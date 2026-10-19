@@ -1070,15 +1070,22 @@ final class BasaltAppModel: ObservableObject {
         process.standardOutput = outputPipe
         process.standardError = errorPipe
 
+        // Wine writes a line in small pieces and the two pipes interleave, so
+        // each pipe buffers its own bytes and logs only whole prefixed lines.
         for pipe in [outputPipe, errorPipe] {
+            let lines = OutputLineBuffer(prefix: prefix)
             pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
                 let data = handle.availableData
-                guard !data.isEmpty else {
+                let completed: [String]
+                if data.isEmpty {
                     handle.readabilityHandler = nil
-                    return
+                    completed = lines.flush().map { [$0] } ?? []
+                } else {
+                    completed = lines.append(data)
                 }
-                let value = String(decoding: data, as: UTF8.self)
-                Task { @MainActor in self?.appendLog(prefix + value) }
+                guard !completed.isEmpty else { return }
+                let value = completed.joined(separator: "\n") + "\n"
+                Task { @MainActor in self?.appendLog(value) }
             }
         }
     }
