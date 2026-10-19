@@ -132,6 +132,9 @@ before each session). The streamer reports a mismatched DLL instead of connectin
 
 ### Fixed
 
+- App logs (`app-*.log`) put the `game:`, `steam:`, and `wine:` prefix on every line instead of on
+  every pipe read, which had scattered it through lines Wine wrote in pieces. Each pipe is now
+  buffered and logged as whole lines.
 - The OpenXR runtime now samples the head once per frame. For one `xrWaitFrame` display time,
   the first `xrLocateViews` or `xrLocateSpace` pins the newest head sample, and every later head
   query for that time returns the same pose. The frame goes to the streamer with that sample's
