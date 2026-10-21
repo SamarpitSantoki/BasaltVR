@@ -64,6 +64,8 @@ public final class RuntimeStereoComposer: @unchecked Sendable {
             texture2d<float, access::sample> left [[texture(0)]],
             texture2d<float, access::sample> right [[texture(1)]],
             texture2d<float, access::write> output [[texture(2)]],
+            constant float4& leftRect [[buffer(0)]],
+            constant float4& rightRect [[buffer(1)]],
             uint2 position [[thread_position_in_grid]])
         {
             if (position.x >= output.get_width() ||
@@ -75,9 +77,20 @@ public final class RuntimeStereoComposer: @unchecked Sendable {
             const uint eyeWidth = output.get_width() / 2;
             const bool rightEye = position.x >= eyeWidth;
             const uint localX = rightEye ? position.x - eyeWidth : position.x;
-            const float2 uv = float2(
+            const float2 localUv = float2(
                 (float(localX) + 0.5f) / float(eyeWidth),
                 (float(position.y) + 0.5f) / float(output.get_height()));
+            // OpenXR gives each eye a pixel rect inside the submitted image (a
+            // UE4 title sends both eyes as one wide texture), so sample only
+            // that rect and stretch it to fill the eye. A zero-sized rect means
+            // the view covers the whole image.
+            const float4 rect = rightEye ? rightRect : leftRect;
+            const float2 sourceSize = rightEye
+                ? float2(float(right.get_width()), float(right.get_height()))
+                : float2(float(left.get_width()), float(left.get_height()));
+            const float2 uv = (rect.z > 0.0f && rect.w > 0.0f)
+                ? (rect.xy + localUv * rect.zw) / sourceSize
+                : localUv;
             const float3 rgb = rightEye
                 ? right.sample(linearSampler, uv).rgb
                 : left.sample(linearSampler, uv).rgb;
@@ -160,6 +173,8 @@ public final class RuntimeStereoComposer: @unchecked Sendable {
     public func composeAsync(
         left: CVPixelBuffer,
         right: CVPixelBuffer,
+        leftRect: SIMD4<Float> = SIMD4<Float>(0, 0, 0, 0),
+        rightRect: SIMD4<Float> = SIMD4<Float>(0, 0, 0, 0),
         completion: @escaping @Sendable (ComposedFrame?) -> Void
     ) -> Bool {
         guard let output = reserveOutput() else { return false }
@@ -174,6 +189,12 @@ public final class RuntimeStereoComposer: @unchecked Sendable {
         encoder.setTexture(leftTexture.1, index: 0)
         encoder.setTexture(rightTexture.1, index: 1)
         encoder.setTexture(output.texture, index: 2)
+        var leftRectValue = leftRect
+        var rightRectValue = rightRect
+        encoder.setBytes(
+            &leftRectValue, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+        encoder.setBytes(
+            &rightRectValue, length: MemoryLayout<SIMD4<Float>>.stride, index: 1)
         let threadWidth = pipeline.threadExecutionWidth
         let threadHeight = max(
             1, pipeline.maxTotalThreadsPerThreadgroup / threadWidth)

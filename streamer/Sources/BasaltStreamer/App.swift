@@ -260,7 +260,24 @@ struct BasaltStreamerApp {
                     consumption.complete()
                     return
                 }
-                let scheduled = runtimeComposer.composeAsync(left: left, right: right) {
+                // A zero-sized rect tells the compositor the view covers the
+                // whole image, so a malformed rect degrades to the previous
+                // full-image behaviour.
+                func rectVector(
+                    _ rect: (x: Int32, y: Int32, width: Int32, height: Int32)
+                ) -> SIMD4<Float> {
+                    guard rect.width > 0, rect.height > 0 else {
+                        return SIMD4<Float>(0, 0, 0, 0)
+                    }
+                    return SIMD4<Float>(
+                        Float(rect.x), Float(rect.y),
+                        Float(rect.width), Float(rect.height))
+                }
+                let leftRect = rectVector(firstView.rect)
+                let rightRect = rectVector(lastView.rect)
+                let scheduled = runtimeComposer.composeAsync(
+                    left: left, right: right,
+                    leftRect: leftRect, rightRect: rightRect) {
                     composed in
                     // Metal has finished reading the runtime swapchains. Let
                     // Beat Saber render its next frame before VideoToolbox

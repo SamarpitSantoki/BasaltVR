@@ -76,6 +76,57 @@ final class RuntimeStereoComposerTests: XCTestCase {
         XCTAssertGreaterThan(bytes[7], 240)
     }
 
+    func testEyeRectsCropASharedSideBySideImage() throws {
+        let composer = try RuntimeStereoComposer(perEyeWidth: 1, height: 1)
+        // One image holding both eyes: left half blue, right half red.
+        let attributes: [CFString: Any] = [
+            kCVPixelBufferMetalCompatibilityKey: true,
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+        ]
+        var maybeSource: CVPixelBuffer?
+        XCTAssertEqual(
+            CVPixelBufferCreate(
+                nil, 2, 1, kCVPixelFormatType_32BGRA,
+                attributes as CFDictionary, &maybeSource),
+            kCVReturnSuccess)
+        let source = try XCTUnwrap(maybeSource)
+        CVPixelBufferLockBaseAddress(source, [])
+        let sourceBytes = CVPixelBufferGetBaseAddress(source)!
+            .assumingMemoryBound(to: UInt8.self)
+        sourceBytes[0] = 255
+        sourceBytes[1] = 0
+        sourceBytes[2] = 0
+        sourceBytes[3] = 255
+        sourceBytes[4] = 0
+        sourceBytes[5] = 0
+        sourceBytes[6] = 255
+        sourceBytes[7] = 255
+        CVPixelBufferUnlockBaseAddress(source, [])
+
+        let completed = expectation(description: "cropped composition")
+        let outputs = FrameStore()
+        XCTAssertTrue(composer.composeAsync(
+            left: source, right: source,
+            leftRect: SIMD4<Float>(0, 0, 1, 1),
+            rightRect: SIMD4<Float>(1, 0, 1, 1)
+        ) { frame in
+            outputs.append(frame)
+            completed.fulfill()
+        })
+        wait(for: [completed], timeout: 2)
+        let composed = try XCTUnwrap(outputs.first()?.pixelBuffer)
+
+        CVPixelBufferLockBaseAddress(composed, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(composed, .readOnly) }
+        let bytes = CVPixelBufferGetBaseAddress(composed)!
+            .assumingMemoryBound(to: UInt8.self)
+        // Each eye samples its own rect instead of the whole image.
+        XCTAssertGreaterThan(bytes[0], 240)
+        XCTAssertLessThan(bytes[2], 15)
+        XCTAssertLessThan(bytes[4], 15)
+        XCTAssertGreaterThan(bytes[6], 240)
+    }
+
     func testCompositionHasStrictTwoFrameBoundAndReusesReleasedSlot() throws {
         let composer = try RuntimeStereoComposer(perEyeWidth: 1, height: 1)
         let source = try pixelBuffer(b: 0, g: 0, r: 0, a: 255)
