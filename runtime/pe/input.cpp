@@ -1091,10 +1091,11 @@ XrResult XRAPI_CALL attachSessionActionSets(
             ReleaseSRWLockExclusive(&gInputLock);
             return XR_ERROR_HANDLE_INVALID;
         }
-        // Attachment is permanent for the life of the action set, even after
-        // its session is destroyed; a duplicate handle in this call is
+        // ALREADY_ATTACHED is per session (checked above). A set released by
+        // a destroyed session may be attached again; `attached` stays set so
+        // the set remains immutable. A duplicate handle in this call is
         // harmless and behaves like a single occurrence.
-        if (record->attached) {
+        if (record->attachedSession != XR_NULL_HANDLE) {
             ReleaseSRWLockExclusive(&gInputLock);
             return XR_ERROR_ACTIONSETS_ALREADY_ATTACHED;
         }

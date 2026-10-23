@@ -2829,6 +2829,41 @@ int main(int argc, char** argv) {
             return fail("session-cascaded xrDestroySpace(LOCAL)", cascadeResult);
         }
     }
+    if (XR_SUCCEEDED(result) && !expectConnected()) {
+        // Action sets outlive their session. A set that has ever been
+        // attached stays immutable, but a new session may attach it again
+        // (ALREADY_ATTACHED from xrAttachSessionActionSets is per session).
+        std::strncpy(actionInfo.actionName, "post_session_action",
+                     XR_MAX_ACTION_NAME_SIZE - 1);
+        std::strncpy(actionInfo.localizedActionName, "Post Session Action",
+                     XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+        XrAction postSessionAction = XR_NULL_HANDLE;
+        result = xrCreateAction(actionSet, &actionInfo, &postSessionAction);
+        if (result != XR_ERROR_ACTIONSETS_ALREADY_ATTACHED ||
+            postSessionAction != XR_NULL_HANDLE) {
+            release(context);
+            release(device);
+            xrDestroyInstance(instance);
+            return fail("xrCreateAction after session destroy", result);
+        }
+        XrSession secondSession = XR_NULL_HANDLE;
+        result = xrCreateSession(instance, &sessionInfo, &secondSession);
+        if (XR_FAILED(result)) {
+            release(context);
+            release(device);
+            xrDestroyInstance(instance);
+            return fail("second xrCreateSession", result);
+        }
+        result = xrAttachSessionActionSets(secondSession, &attachInfo);
+        if (XR_FAILED(result)) {
+            xrDestroySession(secondSession);
+            release(context);
+            release(device);
+            xrDestroyInstance(instance);
+            return fail("xrAttachSessionActionSets on a new session", result);
+        }
+        result = xrDestroySession(secondSession);
+    }
     if (XR_SUCCEEDED(result)) {
         result = xrDestroyInstance(instance);
     }
