@@ -854,7 +854,10 @@ XrResult XRAPI_CALL endFrame(
     const uint64_t questTrackingTimestamp = haveProjection
         ? locatedViewsQuestTimestamp(session, frameEndInfo->displayTime) : 0;
     HeadStatsLine headStats{};
-    const bool logHeadStats = takeHeadStatsLineLocked(&headStats);
+    // The periodic line is for BASALT_RUNTIME_LOG runs only; without it the
+    // game's stderr would get one every 5 s.
+    const bool logHeadStats =
+        basalt::runtimeLogEnabled() && takeHeadStatsLineLocked(&headStats);
     ReleaseSRWLockExclusive(&gLifecycleLock);
     if (logHeadStats) {
         basalt::runtimeLog(

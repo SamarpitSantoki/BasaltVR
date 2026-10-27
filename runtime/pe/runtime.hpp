@@ -38,6 +38,11 @@ constexpr uint64_t kAlvrRightSystemClickPathId = 0x19729bd97073d474ULL;
 // session log can see, so the file is the only record of its runtime.
 void runtimeLog(const char* format, ...);
 
+// True when BASALT_RUNTIME_LOG is set. Read once, through the same INIT_ONCE
+// as runtimeLog (not a function-local static, whose thread-safe init guard
+// would import libwinpthread-1.dll), for diagnostics too chatty for stderr.
+bool runtimeLogEnabled();
+
 bool isValidInstance(XrInstance instance);
 bool isD3D11ExtensionEnabled(XrInstance instance);
 bool isVisibilityMaskExtensionEnabled(XrInstance instance);

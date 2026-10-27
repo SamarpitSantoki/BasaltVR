@@ -15,10 +15,12 @@ namespace {
 INIT_ONCE gRuntimeLogInit = INIT_ONCE_STATIC_INIT;
 SRWLOCK gRuntimeLogLock = SRWLOCK_INIT;
 FILE* gRuntimeLogFile = nullptr;
+bool gRuntimeLogRequested = false;
 
 BOOL CALLBACK openRuntimeLog(PINIT_ONCE, PVOID, PVOID*) {
     char path[MAX_PATH]{};
     const DWORD length = GetEnvironmentVariableA("BASALT_RUNTIME_LOG", path, sizeof(path));
+    gRuntimeLogRequested = length != 0;
     if (length == 0 || length >= sizeof(path) - 2) {
         return TRUE;
     }
@@ -348,6 +350,11 @@ void runtimeLog(const char* format, ...) {
         std::fflush(gRuntimeLogFile);
     }
     ReleaseSRWLockExclusive(&gRuntimeLogLock);
+}
+
+bool runtimeLogEnabled() {
+    InitOnceExecuteOnce(&gRuntimeLogInit, openRuntimeLog, nullptr, nullptr);
+    return gRuntimeLogRequested;
 }
 
 bool isValidInstance(XrInstance instance) {
