@@ -295,8 +295,10 @@ bool rectAxisInBounds(int32_t offset, int32_t extent, uint32_t size) {
 
 // Validates one layer's subimage against the session's swapchains and
 // captures the image the compositor would consume. *direct reports whether
-// the native streamer can read it as-is: an exported swapchain whose whole
-// image is submitted unflipped (the streamer ignores rects).
+// the native streamer can read it as-is: an exported swapchain and an
+// unflipped rect. The streamer crops each eye by its rect, so any in-bounds
+// sub-rect (one half of a side-by-side image) stays direct, but it cannot
+// flip, so a negative extent needs the compositor.
 XrResult validateSubImage(
     XrSession session,
     const XrSwapchainSubImage& subImage,
@@ -328,9 +330,7 @@ XrResult validateSubImage(
     captured->imageIndex = state.lastReleasedIndex;
     captured->imageArrayIndex = subImage.imageArrayIndex;
     captured->rect = rect;
-    *direct = state.exported && rect.offset.x == 0 && rect.offset.y == 0 &&
-              static_cast<int64_t>(rect.extent.width) == state.width &&
-              static_cast<int64_t>(rect.extent.height) == state.height;
+    *direct = state.exported && rect.extent.width > 0 && rect.extent.height > 0;
     return XR_SUCCESS;
 }
 
@@ -819,9 +819,10 @@ XrResult XRAPI_CALL endFrame(
         ? locatedViewsQuestTimestamp(session, frameEndInfo->displayTime) : 0;
     ReleaseSRWLockExclusive(&gLifecycleLock);
 
-    // The streamer reads whole BGRA eye images. A frame that already has
-    // that shape is exported zero-copy exactly as before; anything else is
-    // drawn by the runtime compositor into its own exported images.
+    // The streamer reads BGRA eye images and crops each by its rect. A frame
+    // that already has that shape is exported zero-copy exactly as before;
+    // anything else is drawn by the runtime compositor into its own exported
+    // images.
     basalt::ControlFrameView frameViews[2]{};
     if (haveProjection) {
         const basalt::CompositionLayer& projection =

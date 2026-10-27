@@ -40,9 +40,10 @@ struct SwapchainFormat {
 constexpr SwapchainFormat kSwapchainFormats[] = {
     // Runtime order is preference order. The native CoreVideo handoff can
     // wrap BGRA IOSurfaces directly (zero copy), while CVPixelBuffer rejects
-    // DXMT's RGBA IOSurfaces. Every other format is accepted for the
-    // runtime compositor, which converts it into a BGRA output image. Only
-    // the BGRA pair is advertised unless BASALT_ADVERTISE_ALL_FORMATS=1.
+    // DXMT's RGBA IOSurfaces. Every other format (except B8G8R8A8_TYPELESS,
+    // see resourceFormat) is accepted for the runtime compositor, which
+    // converts it into a BGRA output image. Only the BGRA pair is advertised
+    // unless BASALT_ADVERTISE_ALL_FORMATS=1.
     {DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM,
      DXGI_FORMAT_UNKNOWN, true, false, true},
     {DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
@@ -71,7 +72,8 @@ constexpr SwapchainFormat kSwapchainFormats[] = {
      DXGI_FORMAT_R32G8X24_TYPELESS, false, true, true},
     // Typeless variants are accepted for applications that create their own
     // typed views, but never advertised. Their bytes are sampled as UNORM
-    // (or float), like the matching typed formats.
+    // (or float), like the matching typed formats. B8G8R8A8_TYPELESS is
+    // backed by B8G8R8A8_UNORM, so it can stay on the direct path.
     {DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM,
      DXGI_FORMAT_UNKNOWN, true, false, false},
     {DXGI_FORMAT_B8G8R8A8_TYPELESS, DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -147,13 +149,28 @@ const SwapchainFormat* findFormat(int64_t format) {
     return nullptr;
 }
 
+// UE4 titles create their eye textures as B8G8R8A8_TYPELESS and rely on their
+// own resource views for the sRGB/linear interpretation. That format is backed
+// by a typed B8G8R8A8_UNORM resource and registered with the daemon as UNORM
+// (the streamer accepts only the two BGRA DXGI formats), so UE4 frames stay
+// zero-copy. The other typeless formats keep their typeless resource.
+DXGI_FORMAT resourceFormat(int64_t format) {
+    if (format == static_cast<int64_t>(DXGI_FORMAT_B8G8R8A8_TYPELESS)) {
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
+    }
+    return static_cast<DXGI_FORMAT>(format);
+}
+
 // The pre-compositor rules: the streamer can consume these images directly.
+// A swapchain may hold both eyes side by side (UE4); the streamer crops each
+// eye by its imageRect, so only the swapchain limits apply.
 bool isDirectExportShape(const XrSwapchainCreateInfo& createInfo) {
-    return (createInfo.format == DXGI_FORMAT_B8G8R8A8_UNORM ||
-            createInfo.format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) &&
+    const DXGI_FORMAT format = resourceFormat(createInfo.format);
+    return (format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+            format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) &&
            createInfo.mipCount == 1 &&
-           createInfo.width <= basalt::kMaxViewWidth &&
-           createInfo.height <= basalt::kMaxViewHeight;
+           createInfo.width <= basalt::kMaxSwapchainWidth &&
+           createInfo.height <= basalt::kMaxSwapchainHeight;
 }
 
 uint32_t maxMipCount(uint32_t width, uint32_t height) {
@@ -358,7 +375,7 @@ XrResult XRAPI_CALL createSwapchain(
     // A sampled depth texture needs a typeless resource so that both depth
     // and shader-resource views can be created over it.
     description.Format = sampledDepth
-        ? format->sampledDepthFormat : static_cast<DXGI_FORMAT>(createInfo->format);
+        ? format->sampledDepthFormat : resourceFormat(createInfo->format);
     description.SampleDesc.Count = createInfo->sampleCount;
     description.Usage = D3D11_USAGE_DEFAULT;
     description.BindFlags = bindFlagsForUsage(createInfo->usageFlags);
@@ -469,7 +486,7 @@ XrResult XRAPI_CALL createSwapchain(
                 *swapchain,
                 createInfo->width,
                 createInfo->height,
-                createInfo->format,
+                static_cast<int64_t>(resourceFormat(createInfo->format)),
                 iosurfaceIds.data(),
                 kSwapchainImageCount * createInfo->arraySize);
             // A rejected registration disconnects the daemon, after which no

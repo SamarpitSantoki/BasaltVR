@@ -338,6 +338,31 @@ bool luidEqual(const LUID& left, const LUID& right) {
     return left.LowPart == right.LowPart && left.HighPart == right.HighPart;
 }
 
+// The direct (zero-copy) shape: every image is a shared texture of the given
+// typed format, which the Basalt DXMT fork backs with an IOSurface.
+bool swapchainImagesShared(XrSwapchain swapchain, DXGI_FORMAT format) {
+    uint32_t count = 0;
+    XrSwapchainImageD3D11KHR images[3]{};
+    for (XrSwapchainImageD3D11KHR& image : images) {
+        image.type = XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
+    }
+    if (XR_FAILED(xrEnumerateSwapchainImages(
+            swapchain, 3, &count,
+            reinterpret_cast<XrSwapchainImageBaseHeader*>(images))) ||
+        count == 0) {
+        return false;
+    }
+    for (uint32_t index = 0; index < count; ++index) {
+        D3D11_TEXTURE2D_DESC description{};
+        images[index].texture->GetDesc(&description);
+        if (description.Format != format ||
+            (description.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 int fail(const char* operation, XrResult result) {
     std::fprintf(stderr, "FAIL: %s returned XrResult %d\n", operation, result);
     return 1;
@@ -2409,11 +2434,12 @@ int main(int argc, char** argv) {
                     rgbaPrivate ? compressedResult : result);
     }
     // UE4 hands over a typeless BGRA format for its eye textures; the runtime
-    // backs it with typed BGRA instead of rejecting the swapchain.
+    // backs it with typed BGRA, which stays on the zero-copy path.
     swapchainInfo.format = DXGI_FORMAT_B8G8R8A8_TYPELESS;
     XrSwapchain typelessSwapchain = XR_NULL_HANDLE;
     result = xrCreateSwapchain(session, &swapchainInfo, &typelessSwapchain);
-    if (XR_FAILED(result) || typelessSwapchain == XR_NULL_HANDLE) {
+    if (XR_FAILED(result) || typelessSwapchain == XR_NULL_HANDLE ||
+        !swapchainImagesShared(typelessSwapchain, DXGI_FORMAT_B8G8R8A8_UNORM)) {
         if (typelessSwapchain != XR_NULL_HANDLE) {
             xrDestroySwapchain(typelessSwapchain);
         }
@@ -2421,17 +2447,19 @@ int main(int argc, char** argv) {
         release(context);
         release(device);
         xrDestroyInstance(instance);
-        return fail("xrCreateSwapchain(B8G8R8A8_TYPELESS)", result);
+        return fail("xrCreateSwapchain(B8G8R8A8_TYPELESS as shared BGRA)", result);
     }
     xrDestroySwapchain(typelessSwapchain);
 
     // A side-by-side image is wider than a single view (UE4 submits 2x1152),
-    // so the per-view limit must not be applied to the swapchain image.
+    // so the per-view limit must not be applied to the swapchain image, nor
+    // to the zero-copy export (the streamer crops each eye by its rect).
     const uint32_t viewWidth = swapchainInfo.width;
     swapchainInfo.width = 1700;
     XrSwapchain wideSwapchain = XR_NULL_HANDLE;
     result = xrCreateSwapchain(session, &swapchainInfo, &wideSwapchain);
-    if (XR_FAILED(result) || wideSwapchain == XR_NULL_HANDLE) {
+    if (XR_FAILED(result) || wideSwapchain == XR_NULL_HANDLE ||
+        !swapchainImagesShared(wideSwapchain, DXGI_FORMAT_B8G8R8A8_UNORM)) {
         if (wideSwapchain != XR_NULL_HANDLE) {
             xrDestroySwapchain(wideSwapchain);
         }

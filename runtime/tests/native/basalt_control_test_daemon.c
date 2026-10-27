@@ -15,7 +15,8 @@
  * --compositor-scenarios pairs with d3d11_compositor_smoke.exe: every
  * FrameReady is checked against basalt_compositor_scenarios.h by reading
  * the referenced IOSurfaces (the application's own direct swapchain or the
- * runtime compositor's output; exact or blended pixels at known places).
+ * runtime compositor's output; exact or blended pixels at known places) and,
+ * for the side-by-side scenario, each eye's image rect.
  */
 
 #include <IOSurface/IOSurfaceRef.h>
@@ -461,15 +462,17 @@ static bool is_application_direct(const Swapchain* swapchain) {
            swapchain->image_count == APPLICATION_IMAGE_COUNT;
 }
 
-/* Checks one view of a compositor scenario frame. */
+/* Checks one view of a compositor scenario frame; rect is the view's
+ * x, y, width, height. */
 static bool verify_scenario_view(
     uint64_t frame_number, uint32_t view, const Swapchain* swapchain,
-    uint32_t image_index) {
+    uint32_t image_index, const int32_t rect[4]) {
     const float width = (float)BASALT_COMPOSITOR_VIEW_WIDTH;
     const float height = (float)BASALT_COMPOSITOR_VIEW_HEIGHT;
     IOSurfaceRef surface = swapchain->surfaces[image_index];
     const bool direct_expected =
-        frame_number == BASALT_SCENARIO_DIRECT || frame_number == BASALT_SCENARIO_FIFO;
+        frame_number == BASALT_SCENARIO_DIRECT || frame_number == BASALT_SCENARIO_FIFO ||
+        frame_number == BASALT_SCENARIO_SIDE_BY_SIDE;
     if (frame_number > BASALT_SCENARIO_COUNT) {
         fprintf(stderr, "FAIL: unexpected extra FrameReady %" PRIu64 "\n", frame_number);
         return false;
@@ -557,6 +560,34 @@ static bool verify_scenario_view(
         }
         return expect_pixel(frame_number, view, surface, 0, 0,
                             kBasaltFifoReleasedColor, 0, "released image");
+    case BASALT_SCENARIO_SIDE_BY_SIDE: {
+        /* The typeless image is registered as B8G8R8A8_UNORM (checked
+         * above), and each eye selects its half of it by rect. */
+        const int32_t half = (int32_t)(BASALT_SIDE_BY_SIDE_WIDTH / 2);
+        const float seam = (float)half;
+        if (swapchain->width != BASALT_SIDE_BY_SIDE_WIDTH ||
+            swapchain->height != BASALT_SIDE_BY_SIDE_HEIGHT ||
+            rect[0] != (view == 0 ? 0 : half) || rect[1] != 0 || rect[2] != half ||
+            rect[3] != (int32_t)BASALT_SIDE_BY_SIDE_HEIGHT) {
+            fprintf(stderr,
+                    "FAIL: side-by-side view %u is %ux%u rect %d,%d %dx%d; expected the "
+                    "%ux%u image's %s half\n",
+                    view, swapchain->width, swapchain->height, rect[0], rect[1], rect[2],
+                    rect[3], BASALT_SIDE_BY_SIDE_WIDTH, BASALT_SIDE_BY_SIDE_HEIGHT,
+                    view == 0 ? "left" : "right");
+            return false;
+        }
+        return expect_pixel(frame_number, view, surface, seam - 1.0f, 0,
+                            kBasaltSideBySideLeftColor, 0, "left of the seam") &&
+               expect_pixel(frame_number, view, surface, seam, 0,
+                            kBasaltSideBySideRightColor, 0, "right of the seam") &&
+               expect_pixel(frame_number, view, surface,
+                            (float)rect[0] + (float)half * 0.5f,
+                            (float)BASALT_SIDE_BY_SIDE_HEIGHT * 0.5f,
+                            view == 0 ? kBasaltSideBySideLeftColor
+                                      : kBasaltSideBySideRightColor,
+                            0, "eye rect center");
+    }
     default:
         fprintf(stderr, "FAIL: unexpected FrameReady %" PRIu64 "\n", frame_number);
         return false;
@@ -610,7 +641,10 @@ static bool handle_frame_ready(int fd, const uint8_t* payload, size_t length) {
             return false;
         }
         if (g_compositor_scenarios) {
-            if (!verify_scenario_view(frame_number, i, swapchain, image_index)) {
+            const int32_t rect[4] = {
+                (int32_t)read_u32(view + 16), (int32_t)read_u32(view + 20),
+                (int32_t)read_u32(view + 24), (int32_t)read_u32(view + 28)};
+            if (!verify_scenario_view(frame_number, i, swapchain, image_index, rect)) {
                 return false;
             }
             /* Both composited eyes come from one output ring slot. */

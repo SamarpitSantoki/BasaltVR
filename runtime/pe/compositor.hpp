@@ -9,12 +9,13 @@
 #include <cstdint>
 
 // Runtime-side layer compositor. The native streamer consumes exactly two
-// BGRA IOSurface eye images per frame and ignores image rects, so any frame
-// it cannot take directly (non-BGRA, mipmapped, or oversized swapchains, quad
-// layers, sub-rects, or flipped rects) is drawn on the game's immediate
-// context into a runtime-owned BGRA output swapchain, which is registered
-// with the daemon like an application swapchain. Frames that already satisfy
-// the direct export rules never touch this path.
+// BGRA IOSurface eye images per frame and crops each by its unflipped image
+// rect, so any frame it cannot take directly (non-BGRA, mipmapped, or
+// oversized swapchains, quad layers, or flipped rects) is drawn on the game's
+// immediate context into a runtime-owned BGRA output swapchain, which is
+// registered with the daemon like an application swapchain. Frames that
+// already satisfy the direct export rules (including side-by-side images with
+// one rect per eye) never touch this path.
 
 namespace basalt {
 

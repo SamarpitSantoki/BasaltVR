@@ -45,7 +45,10 @@ enum {
     BASALT_SCENARIO_QUAD_ONLY = 7,
     /* e: wait/release follow acquisition order, not image index order. */
     BASALT_SCENARIO_FIFO = 8,
-    BASALT_SCENARIO_COUNT = 8,
+    /* UE4's shape: one B8G8R8A8_TYPELESS image, wider than a view, with one
+     * half rect per eye, stays zero-copy (the streamer crops by rect). */
+    BASALT_SCENARIO_SIDE_BY_SIDE = 9,
+    BASALT_SCENARIO_COUNT = 9,
 };
 
 #define BASALT_RGBA(r, g, b, a) \
@@ -73,6 +76,11 @@ static const uint32_t kBasaltSkyBottomColor = BASALT_RGBA(20, 160, 180, 255);
 static const uint32_t kBasaltFifoReleasedColor = BASALT_RGBA(17, 220, 140, 255);
 static const uint32_t kBasaltFifoHeldColor = BASALT_RGBA(140, 17, 220, 255);
 #define BASALT_FIFO_RELEASED_IMAGE 2u
+/* Side by side: 2x1152 is wider than the runtime's largest view (1680). */
+#define BASALT_SIDE_BY_SIDE_WIDTH 2304u
+#define BASALT_SIDE_BY_SIDE_HEIGHT 1216u
+static const uint32_t kBasaltSideBySideLeftColor = BASALT_RGBA(210, 40, 120, 255);
+static const uint32_t kBasaltSideBySideRightColor = BASALT_RGBA(40, 180, 60, 255);
 
 /* The quad layer: LOCAL pose (0, head height, -distance), identity
  * orientation, square size. */

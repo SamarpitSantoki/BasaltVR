@@ -4,10 +4,12 @@
 // compositor added: format enumeration and creation, the 16-swapchain limit,
 // quad/flipped-rect/unknown-layer validation, FIFO acquire/wait/release
 // order, repeated wait+begin without end, and that a destroyed session's
-// state events are never delivered to its successor. With the Basalt DXMT
-// fork and the native test daemon in --compositor-scenarios mode it also
-// submits one frame per entry of basalt_compositor_scenarios.h; the daemon
-// verifies each by IOSurface readback.
+// state events are never delivered to its successor, and that UE4's
+// side-by-side B8G8R8A8_TYPELESS image is created as a shared BGRA image.
+// With the Basalt DXMT fork and the native test daemon in
+// --compositor-scenarios mode it also submits one frame per entry of
+// basalt_compositor_scenarios.h; the daemon verifies each by IOSurface
+// readback.
 
 #include <windows.h>
 
@@ -337,6 +339,12 @@ PixelFunction quadrantPixels() {
 PixelFunction halvesPixels(uint32_t top, uint32_t bottom) {
     return [top, bottom](uint32_t, uint32_t y, uint32_t, uint32_t h) {
         return y < h / 2 ? top : bottom;
+    };
+}
+
+PixelFunction leftRightPixels(uint32_t left, uint32_t right) {
+    return [left, right](uint32_t x, uint32_t, uint32_t w, uint32_t) {
+        return x < w / 2 ? left : right;
     };
 }
 
@@ -971,7 +979,41 @@ bool runScenarios(Harness& harness, Swapchain& left, Swapchain& right) {
             return false;
         }
     }
-    return finishFifo(fifo);
+    if (!finishFifo(fifo)) {
+        return false;
+    }
+
+    // UE4's shape: both eyes in one B8G8R8A8_TYPELESS image wider than a
+    // view, one half rect per eye. It is backed by typed BGRA and exported,
+    // so the frame references this swapchain with both rects (no compositor).
+    Swapchain sideBySide;
+    if (!createSwapchain(harness, DXGI_FORMAT_B8G8R8A8_TYPELESS, BASALT_SIDE_BY_SIDE_WIDTH,
+                         BASALT_SIDE_BY_SIDE_HEIGHT, 1, &sideBySide)) {
+        return false;
+    }
+    harness.swapchains.push_back(sideBySide);
+    D3D11_TEXTURE2D_DESC description{};
+    sideBySide.images[0]->GetDesc(&description);
+    if (!check(description.Format == DXGI_FORMAT_B8G8R8A8_UNORM &&
+                   (description.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) != 0,
+               "side-by-side B8G8R8A8_TYPELESS image is not a shared B8G8R8A8_UNORM texture") ||
+        !renderImage(harness, sideBySide,
+                     leftRightPixels(kBasaltSideBySideLeftColor, kBasaltSideBySideRightColor)) ||
+        !beginFrame(harness, &frame)) {
+        return false;
+    }
+    {
+        const int32_t half = static_cast<int32_t>(BASALT_SIDE_BY_SIDE_WIDTH / 2);
+        const int32_t height = static_cast<int32_t>(BASALT_SIDE_BY_SIDE_HEIGHT);
+        ProjectionLayer projection(harness, frame, sideBySide, sideBySide,
+                                   {{0, 0}, {half, height}}, {{half, 0}, {half, height}});
+        const XrCompositionLayerBaseHeader* layers[] = {projection.header()};
+        if (!succeeded(endFrame(harness, frame, layers, 1),
+                       "side-by-side scenario xrEndFrame")) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool endSessionCleanly(Harness& harness) {

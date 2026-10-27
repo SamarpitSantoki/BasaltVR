@@ -383,12 +383,13 @@ if [[ -f ${fork_install}/x86_64-windows/d3d11.dll && -f ${fork_install}/x86_64-u
     # Runtime compositor gate: OpenComposite-shaped swapchains and layers
     # (sRGB RGBA, mipmapped, oversized, flipped, blended quads, quad-only)
     # arrive as the compositor's BGRA output with the expected pixels, the
-    # direct BGRA path still exports the application's own surfaces, and
+    # direct BGRA path still exports the application's own surfaces (also
+    # for UE4's side-by-side typeless image with one rect per eye), and
     # wait/release follow acquisition order.
     run_control_gate "runtime compositor" \
         --smoke ./d3d11_compositor_smoke.exe -- \
         "${probe_dir}/basalt_control_test_daemon" \
-        --expect-frames 8 --compositor-scenarios \
+        --expect-frames 9 --compositor-scenarios \
         --view-width 512 --view-height 512
 
     # The production streamer's RuntimeLink, not just the C test daemon, must
