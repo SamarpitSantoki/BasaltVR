@@ -278,6 +278,11 @@ enum VRMessages {
         if !result.replacedCopies.isEmpty {
             text += " Copies of the replaced files: " + result.replacedCopies.map(\.lastPathComponent).joined(separator: ", ") + "."
         }
+        if !result.skipped.isEmpty {
+            text += " Left unchanged because they do not match the OpenComposite build: "
+                + result.skipped.map { "\($0.url.path) (\($0.architecture))" }.joined(separator: ", ")
+                + "."
+        }
         if !result.updatedByGame.isEmpty {
             text += " The game's openvr_api.dll changed since Basalt kept the original, so the newer DLL is the original now. "
                 + staleOriginalsSentence(result.staleOriginals)

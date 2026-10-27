@@ -93,6 +93,9 @@ before each session). The streamer reports a mismatched DLL instead of connectin
 - Deleting a profile with VR files offers **Restore and Delete** or **Delete Only**, and always
   removes its `VRSetup/<profile>.json` record, so a new profile with the same name no longer
   inherits the old setup.
+- Prepare VR skips `openvr_api.dll` copies for another architecture (such as a 32-bit copy in
+  Unity's `Plugins/x86`), leaves them unchanged, and lists them, instead of stopping the whole
+  setup. It stops only when no copy matches the OpenComposite build.
 
 ### Changed
 

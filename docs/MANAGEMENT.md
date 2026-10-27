@@ -78,7 +78,10 @@ shows the session state with a Stop button.
    - Basalt uses only these local builds and never downloads OpenComposite. When one is missing,
      the sheet names the command that builds it (`runtime/scripts/build-opencomposite.zsh`, or
      `runtime/scripts/test-openvr-proxy.zsh` for the proxy) and the checkout it runs in, and
-     Prepare stays disabled. Both must be 64-bit PE DLLs, and a 32-bit game DLL is refused.
+     Prepare stays disabled. Both must be 64-bit PE DLLs. When a game has several
+     `openvr_api.dll` copies, a copy for another architecture (such as a 32-bit one in Unity's
+     `Plugins/x86`) is skipped, left unchanged, and listed in the result; the matching copies are
+     set up. When no copy matches, Prepare stops with nothing changed and names each copy.
    - OpenVR and Alyx setup is source-checkout-only. OpenComposite is GPLv3, so the release bundle
      does not include it or the proxy. When the app runs from a release bundle (packaged support
      files instead of a source checkout), the sheet says so before a mode is chosen, Prepare VR
@@ -181,8 +184,11 @@ generation, live-stat parsing, session history persistence and summaries, stream
 metric CSV export, diagnostic redaction, and report rendering. `VRSetupTests` covers VR setup:
 PE import parsing, Alyx/OpenVR/OpenXR/uncertain detection (a nearby DLL alone is not enough,
 links are not followed), the Alyx proxy, preset, and arguments, native OpenXR changing nothing,
-missing builds, 32-bit DLLs, repeat setup keeping the first backup, the status after a Steam-style
-DLL restore, custom-file protection, replacement copies, restore, rollback after a failure
-part-way, and paths or links that leave the bottle. `BasaltBottleKitTests` also verifies repository/support-root
+missing builds and release bundles without OpenComposite, 32-bit and mixed-architecture DLLs,
+repeat setup keeping the first backup, the status after a Steam-style
+DLL restore, a game update between setup and Restore (the updated DLL is kept and the old
+original retired), custom-file protection, replacement copies, restore, profile deletion with
+and without Restore (the VR record always goes), rollback after a failure part-way, and paths
+or links that leave the bottle. `BasaltBottleKitTests` also verifies repository/support-root
 discovery, maintenance and VR launch commands, the BSManager Steam prerequisite, profile deletion,
 and a real isolated import whose source remains unchanged.

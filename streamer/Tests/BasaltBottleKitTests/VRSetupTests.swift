@@ -428,6 +428,66 @@ final class VRSetupTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: dll), Self.pe(machine: 0x014c, marker: 2))
     }
 
+    func testMixedArchitectureCopiesAreSkippedAndTheMatchingOnesInstalled() throws {
+        let exe = try write(Self.pe(marker: 1), "Games/Mixed/Mixed.exe")
+        let x64 = try write(Self.pe(marker: 2), "Games/Mixed/Mixed_Data/Plugins/x86_64/openvr_api.dll")
+            .standardizedFileURL
+        let x86Bytes = Self.pe(machine: 0x014c, marker: 3)
+        let x86 = try write(x86Bytes, "Games/Mixed/Mixed_Data/Plugins/x86/openvr_api.dll")
+            .standardizedFileURL
+        try saveProfile("mixed", executable: #"C:\Games\Mixed\Mixed.exe"#)
+        let location = VRGameLocation(executable: exe, folder: exe.deletingLastPathComponent())
+        let skipped = [VRSkippedDLL(url: x86, architecture: "32-bit (x86)")]
+
+        // Only the matching copy needs permission.
+        XCTAssertThrowsError(try manager.prepareVR(
+            profileName: "mixed", location: location, mode: .auto, artifacts: artifacts)) {
+            XCTAssertEqual(($0 as? VRCustomFilesError)?.files, [x64])
+        }
+        let result = try manager.prepareVR(
+            profileName: "mixed", location: location, mode: .auto, artifacts: artifacts,
+            replaceCustomFiles: true)
+        XCTAssertEqual(result.targets, [x64])
+        XCTAssertEqual(result.skipped, skipped)
+        guard case .ready(.openVR, _) = result.status else { return XCTFail("\(result.status)") }
+        XCTAssertEqual(try Data(contentsOf: x64), try Data(contentsOf: artifacts.openComposite))
+        XCTAssertEqual(try Data(contentsOf: x86), x86Bytes)
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: x86.deletingLastPathComponent().path),
+                       ["openvr_api.dll"])
+
+        // Repeating skips it again and keeps the same setup.
+        let again = try manager.prepareVR(profileName: "mixed", location: location, mode: .auto,
+                                          artifacts: artifacts)
+        XCTAssertEqual(again.skipped, skipped)
+        XCTAssertEqual(again.targets, [x64])
+
+        try manager.restoreVR(profileName: "mixed")
+        XCTAssertEqual(try Data(contentsOf: x64), Self.pe(marker: 2))
+        XCTAssertEqual(try Data(contentsOf: x86), x86Bytes)
+    }
+
+    func testNoMatchingCopyFailsAndNamesEveryCopy() throws {
+        let exe = try write(Self.pe(marker: 1), "Games/Old32/Old32.exe")
+        let first = try write(Self.pe(machine: 0x014c, marker: 2),
+                              "Games/Old32/Old32_Data/Plugins/openvr_api.dll")
+        let second = try write(Self.pe(machine: 0x014c, marker: 3),
+                               "Games/Old32/Old32_Data/Plugins/x86/openvr_api.dll")
+        try saveProfile("old32", executable: #"C:\Games\Old32\Old32.exe"#)
+        XCTAssertThrowsError(try manager.prepareVR(
+            profileName: "old32",
+            location: VRGameLocation(executable: exe, folder: exe.deletingLastPathComponent()),
+            mode: .auto, artifacts: artifacts, replaceCustomFiles: true)) {
+            let text = $0.localizedDescription
+            XCTAssertTrue(text.contains("No openvr_api.dll of this game matches"), text)
+            XCTAssertTrue(text.contains(first.standardizedFileURL.path), text)
+            XCTAssertTrue(text.contains(second.standardizedFileURL.path), text)
+            XCTAssertTrue(text.contains("32-bit"), text)
+        }
+        XCTAssertEqual(try Data(contentsOf: first), Self.pe(machine: 0x014c, marker: 2))
+        XCTAssertEqual(try Data(contentsOf: second), Self.pe(machine: 0x014c, marker: 3))
+        XCTAssertEqual(manager.vrSetupStatus(profileName: "old32"), .notPrepared)
+    }
+
     // MARK: - Custom files
 
     func testCustomConfigurationIsProtectedUntilReplacedAndKeptOnRestore() throws {

@@ -637,6 +637,9 @@ struct AddGameSheet: View {
             guard prepare else { return dismiss() }
             switch await model.prepareVR(profileName: profileName, location: location,
                                          mode: mode, replaceCustomFiles: replacing) {
+            case .success(let result) where !result.skipped.isEmpty:
+                // Say which copies stayed unchanged; Done closes the sheet.
+                vrNotice = VRMessages.prepared(result)
             case .success:
                 isAdding = false
                 dismiss()

@@ -111,8 +111,17 @@ public enum VRSetupStatus: Equatable, Sendable {
     }
 }
 
+/// A game `openvr_api.dll` that Prepare VR left untouched because it is for another architecture
+/// than the local OpenComposite build (for example a 32-bit copy in Unity's `Plugins/x86`).
+public struct VRSkippedDLL: Equatable, Sendable {
+    public var url: URL
+    /// The DLL's architecture, such as "32-bit (x86)".
+    public var architecture: String
+}
+
 public struct VRPrepareResult: Equatable, Sendable {
     public var kind: VRRuntimeKind
+    /// The DLLs Basalt installed over. Skipped copies are not here.
     public var targets: [URL]
     public var replacedCopies: [URL]
     public var status: VRSetupStatus
@@ -122,6 +131,8 @@ public struct VRPrepareResult: Equatable, Sendable {
     /// Where each older original now is: a new `openvr_api.dll.basalt-stale-original-<time>`, or
     /// an identical copy Basalt already kept.
     public var staleOriginals: [URL] = []
+    /// Copies left untouched because they do not match the OpenComposite build.
+    public var skipped: [VRSkippedDLL] = []
 }
 
 public struct VRRestoreReport: Equatable, Sendable {
@@ -310,16 +321,39 @@ extension BottleManager {
         case .openXR:
             targets = []
         }
-        let normalizedTargets = targets.map(\.standardizedFileURL)
+        let (openCompositeBytes, proxyBytes) = try loadArtifacts(artifacts, needsProxy: kind == .alyx)
+        let machine = PEImage.machine(openCompositeBytes)!
+
+        // A game can ship copies for several architectures (Unity's Plugins/x86 next to
+        // Plugins/x86_64). Copies that do not match the build are skipped and left untouched.
+        // Links are not read here; the checks below refuse them.
+        var normalizedTargets = [URL]()
+        var skipped = [VRSkippedDLL]()
+        for dll in targets.map(\.standardizedFileURL) {
+            if !isSymbolicLink(dll), let current = try? Data(contentsOf: dll),
+               let gameMachine = PEImage.machine(current), gameMachine != machine {
+                skipped.append(VRSkippedDLL(
+                    url: dll, architecture: PEImage.describe(machine: gameMachine)))
+            } else {
+                normalizedTargets.append(dll)
+            }
+        }
+        guard !normalizedTargets.isEmpty else {
+            let build = PEImage.describe(machine: machine)
+            if skipped.count == 1 {
+                throw BottleToolError(
+                    "\(skipped[0].url.path) is \(skipped[0].architecture), but the local OpenComposite build is \(build). This game needs a matching OpenComposite build.")
+            }
+            let list = skipped.map { "• \($0.url.path): \($0.architecture)" }.joined(separator: "\n")
+            throw BottleToolError(
+                "No openvr_api.dll of this game matches the local OpenComposite build, which is \(build):\n\(list)\nThis game needs a matching OpenComposite build.")
+        }
         if let existing, !existing.targets.isEmpty,
            existing.kind != kind
             || Set(existing.targets.map(\.dll)) != Set(normalizedTargets.map(\.path)) {
             throw BottleToolError(
                 "This game already has a \(existing.kind.label) setup for other files. Use Restore VR Files first, then Prepare VR again.")
         }
-
-        let (openCompositeBytes, proxyBytes) = try loadArtifacts(artifacts, needsProxy: kind == .alyx)
-        let machine = PEImage.machine(openCompositeBytes)!
         let configuration: OpenCompositeConfiguration = kind == .alyx ? .alyx : .standard
         let iniBytes = Data(configuration.iniText.utf8)
         let knownINIs: Set<Data> = [
@@ -492,7 +526,7 @@ extension BottleManager {
             return VRPrepareResult(
                 kind: kind, targets: normalizedTargets,
                 replacedCopies: copies, status: status,
-                updatedByGame: updatedByGame, staleOriginals: staleOriginals)
+                updatedByGame: updatedByGame, staleOriginals: staleOriginals, skipped: skipped)
         } catch {
             transaction.rollBack()
             throw error
