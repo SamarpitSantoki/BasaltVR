@@ -20,11 +20,18 @@ components.
 ## OpenComposite
 
 `runtime/scripts/build-opencomposite.zsh` clones OpenComposite source from
-<https://github.com/Charmillionaire/OpenComposite> at the pinned commit
-`339509b9caf534fa2ced71dc71331ec3c9c3a1a6` (a fork of the upstream
-[`openxr` branch](https://gitlab.com/znixian/OpenOVR/-/tree/openxr)), applies Basalt's patches, and
+<https://gitlab.com/znixian/OpenOVR.git> at the pinned upstream commit
+`cff07db75c4823afe93ed7027b03d5f7bc86f164` (the
+[`openxr` branch](https://gitlab.com/znixian/OpenOVR/-/tree/openxr)), applies the patches below, and
 builds `openvr_api.dll` on the user's Mac under the ignored `runtime/build` tree. No prebuilt
 OpenComposite binary is downloaded, and BasaltVR does not redistribute the result.
+
+The first six patches (`opencomposite-patches/fork`) are the commits of the
+<https://github.com/Charmillionaire/OpenComposite> fork, up to `339509b9caf534fa2ced71dc71331ec3c9c3a1a6`,
+that add OpenVR 2.15.6 interfaces. They are kept here as patches, with their original authorship, so
+the build does not depend on that repository. One of them adds Valve's `openvr-2.15.6.h`, which is
+Copyright Valve Corporation and BSD-3-Clause licensed (see `LICENSE_OPENVR.txt` in the upstream
+repository).
 
 The patch files in
 [`runtime/openvr-proxy/opencomposite-patches`](runtime/openvr-proxy/opencomposite-patches) modify

@@ -1,11 +1,12 @@
 #!/bin/zsh
 
 # Builds OpenComposite (OpenVR -> OpenXR) from source as a 64-bit Windows
-# openvr_api.dll for Basalt's D3D11 path. The source is the Charmillionaire
-# fork of the upstream `openxr` branch, pinned to an exact commit, plus the
-# patches in runtime/openvr-proxy/opencomposite-patches. Everything is cloned
-# and built under the ignored runtime/build tree with the Homebrew MinGW-w64
-# toolchain. No prebuilt OpenComposite binary is downloaded.
+# openvr_api.dll for Basalt's D3D11 path. The source is upstream OpenOVR on
+# GitLab, pinned to an exact commit, plus the patches in
+# runtime/openvr-proxy/opencomposite-patches: first the fork/ patches, then
+# Basalt's own. Everything is cloned and built under the ignored runtime/build
+# tree with the Homebrew MinGW-w64 toolchain. No prebuilt OpenComposite binary
+# is downloaded.
 #
 # OpenComposite is GPL-3.0. Basalt does not redistribute the result; users build
 # it locally and install it with `basaltctl opencomposite install`.
@@ -18,13 +19,15 @@ script_dir=${0:A:h}
 runtime_dir=${script_dir:h}
 build_dir=${BUILD_DIR:-${runtime_dir}/build}
 
-# Upstream: https://gitlab.com/znixian/OpenOVR (branch openxr, cff07db). This
-# fork adds OpenVR 2.15.6 interfaces (IVRSystem_026, IVRCompositor_029,
-# IVRInput_011, IVROverlay_028, IVRApplications_008) and answers the
+# Upstream: https://gitlab.com/znixian/OpenOVR (branch openxr, cff07db). The
+# patches in opencomposite-patches/fork are the six commits of
+# https://github.com/Charmillionaire/OpenComposite (339509b) on top of cff07db.
+# They add OpenVR 2.15.6 interfaces (IVRSystem_026, IVRCompositor_029,
+# IVRInput_011, IVROverlay_028, IVRApplications_008) and answer the
 # IVRIPCResourceManagerClient probe instead of aborting; current Half-Life: Alyx
 # builds need these. See docs/OPENCOMPOSITE.md.
-readonly oc_repo=https://github.com/Charmillionaire/OpenComposite.git
-readonly oc_commit=339509b9caf534fa2ced71dc71331ec3c9c3a1a6
+readonly oc_repo=https://gitlab.com/znixian/OpenOVR.git
+readonly oc_commit=cff07db75c4823afe93ed7027b03d5f7bc86f164
 readonly basalt_tag=basalt-patched
 
 patches_dir=${runtime_dir}/openvr-proxy/opencomposite-patches
@@ -43,7 +46,7 @@ for tool in git cmake python3 shasum x86_64-w64-mingw32-g++ x86_64-w64-mingw32-o
 done
 objdump_bin=$(command -v x86_64-w64-mingw32-objdump)
 
-patches=(${patches_dir}/*.patch(N))
+patches=(${patches_dir}/fork/*.patch(N) ${patches_dir}/*.patch(N))
 patches_sha=$(cat /dev/null ${patches} | shasum -a 256 | awk '{print $1}')
 
 fresh_clone=0
@@ -51,6 +54,9 @@ if [[ ! -d ${src_dir}/.git ]]; then
     mkdir -p "${oc_dir}"
     git clone --no-checkout "${oc_repo}" "${src_dir}"
     fresh_clone=1
+elif [[ $(git -C "${src_dir}" remote get-url origin) != ${oc_repo} ]]; then
+    # An earlier build cloned a fork; fetch from upstream from now on.
+    git -C "${src_dir}" remote set-url origin "${oc_repo}"
 fi
 
 if [[ $(git -C "${src_dir}" rev-parse -q --verify "${basalt_tag}^{commit}" 2>/dev/null) != '' ]] &&
@@ -69,6 +75,9 @@ else
     if ! git -C "${src_dir}" cat-file -e "${oc_commit}^{commit}" 2>/dev/null; then
         git -C "${src_dir}" fetch origin
     fi
+    if ! git -C "${src_dir}" cat-file -e "${oc_commit}^{commit}" 2>/dev/null; then
+        git -C "${src_dir}" fetch origin "${oc_commit}"
+    fi
     git -C "${src_dir}" checkout --quiet --detach "${oc_commit}"
     if [[ $(git -C "${src_dir}" rev-parse HEAD) != ${oc_commit} ]]; then
         print -u2 "FAIL: OpenComposite checkout is not ${oc_commit}"
@@ -79,11 +88,11 @@ else
     git -C "${src_dir}" submodule update --init libs/openxr-sdk libs/glm
     for patch in ${patches}; do
         if ! git -C "${src_dir}" apply --check "${patch}"; then
-            print -u2 "FAIL: ${patch:t} does not apply to OpenComposite ${oc_commit}"
+            print -u2 "FAIL: ${patch#${patches_dir}/} does not apply to OpenComposite ${oc_commit}"
             exit 1
         fi
         git -C "${src_dir}" apply --index "${patch}"
-        print "Applied ${patch:t}"
+        print "Applied ${patch#${patches_dir}/}"
     done
     git -C "${src_dir}" -c user.name="BasaltVR build" -c user.email="build@basaltvr.invalid" \
         commit --quiet --allow-empty -m "Basalt patches" -m "patches-sha ${patches_sha}"
@@ -136,13 +145,13 @@ if [[ ${export_names} != ${expected_names} ]]; then
     exit 1
 fi
 
-# Patch 0004: MSVC-built games call struct-returning methods (GetEyeToHeadTransform,
+# Basalt patch 0004: MSVC-built games call struct-returning methods (GetEyeToHeadTransform,
 # GetProjectionMatrix, ...) with 'this' first and the return pointer second; MinGW does the
 # reverse. Without the patch the first such call overwrites OpenComposite's vtable (seen in
 # The Lab as a crash right after "OpenVR initialized!").
 if ! grep -q 'GetEyeToHeadTransform(vr::HmdMatrix34_t \*_ocRet, vr::EVREye eEye) override' \
         "${oc_build_dir}/generated/GVRSystem.gen.h" 2>/dev/null; then
-    print -u2 "FAIL: generated OpenComposite stubs do not use the MSVC aggregate-return ABI (patch 0004)"
+    print -u2 "FAIL: generated OpenComposite stubs do not use the MSVC aggregate-return ABI (Basalt patch 0004)"
     exit 1
 fi
 
