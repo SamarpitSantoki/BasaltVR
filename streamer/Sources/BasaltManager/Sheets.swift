@@ -142,7 +142,9 @@ struct ProfileEditorSheet: View {
                 } header: {
                     Text("VR Setup")
                 } footer: {
-                    Text("Prepare VR finds the game's VR files and uses your local OpenComposite build. Save other profile changes first: setup can change this profile's arguments.")
+                    Text(model.vrArtifacts.isSourceCheckout
+                         ? "Prepare VR finds the game's VR files and uses your local OpenComposite build. Save other profile changes first: setup can change this profile's arguments."
+                         : "This copy of Basalt does not include OpenComposite, so Prepare VR sets up only native OpenXR games. OpenVR games need a BasaltVR source checkout. Restore Game Files… works in every build. Save other profile changes first: setup can change this profile's arguments.")
                         .formFooterStyle()
                 }
             }

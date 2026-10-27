@@ -46,8 +46,15 @@ struct VRSetupSection: View {
                     Label("Basalt is not sure. Choose the mode the game uses.",
                           systemImage: "questionmark.circle")
                         .foregroundStyle(.orange)
+                    if !artifacts.isSourceCheckout,
+                       let problem = artifacts.missingProblem(for: .openVR) {
+                        // Said before a mode is chosen: a release build cannot set up OpenVR.
+                        Label(problem, systemImage: "shippingbox")
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 } else if let kind, let problem = artifacts.missingProblem(for: kind) {
-                    Label(problem, systemImage: "hammer")
+                    Label(problem, systemImage: artifacts.isSourceCheckout ? "hammer" : "shippingbox")
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 } else if let kind {
@@ -135,6 +142,11 @@ struct PrepareVRSheet: View {
         return model.vrArtifacts.missingProblem(for: kind) == nil
     }
 
+    /// Why Prepare VR is off when the build it needs is missing. Restore needs no build.
+    private var prepareHelp: String {
+        kind.flatMap { model.vrArtifacts.missingProblem(for: $0) } ?? ""
+    }
+
     var body: some View {
         SheetScaffold(
             symbol: "visionpro",
@@ -180,6 +192,7 @@ struct PrepareVRSheet: View {
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
                 .disabled(!canPrepare)
+                .help(prepareHelp)
         }
         .frame(width: 620, height: 560)
         .interactiveDismissDisabled(isWorking)

@@ -77,8 +77,14 @@ shows the session state with a Stop button.
      `--space Local`).
    - Basalt uses only these local builds and never downloads OpenComposite. When one is missing,
      the sheet names the command that builds it (`runtime/scripts/build-opencomposite.zsh`, or
-     `runtime/scripts/test-openvr-proxy.zsh` for the proxy) and Prepare stays disabled. Both must
-     be 64-bit PE DLLs, and a 32-bit game DLL is refused.
+     `runtime/scripts/test-openvr-proxy.zsh` for the proxy) and the checkout it runs in, and
+     Prepare stays disabled. Both must be 64-bit PE DLLs, and a 32-bit game DLL is refused.
+   - OpenVR and Alyx setup is source-checkout-only. OpenComposite is GPLv3, so the release bundle
+     does not include it or the proxy. When the app runs from a release bundle (packaged support
+     files instead of a source checkout), the sheet says so before a mode is chosen, Prepare VR
+     stays disabled for OpenVR and Alyx, and the message says to build OpenComposite in a
+     BasaltVR source checkout and start the app from there. Native OpenXR setup and **Restore
+     Game Files…** need no build and work in every copy.
    - The game's first `openvr_api.dll` is kept as `openvr_api.dll.basalt-original` and never
      replaced by a later setup. Files Basalt did not write (including the game's first
      `openvr_api.dll`, a custom `openvr_api_opencomposite.dll`, or an edited

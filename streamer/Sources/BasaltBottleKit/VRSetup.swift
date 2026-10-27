@@ -1,40 +1,60 @@
 import CryptoKit
 import Foundation
 
-/// The locally built OpenComposite and OpenVR proxy. Basalt never downloads either.
+/// The locally built OpenComposite and OpenVR proxy. Basalt never downloads either, and release
+/// builds never include them: OpenComposite is GPLv3 software, so only a BasaltVR source
+/// checkout can build it. Restore needs neither file.
 public struct VRArtifacts: Equatable, Sendable {
     public var openComposite: URL
     public var proxy: URL
+    /// The BasaltVR source checkout that builds these files, or nil when Basalt runs from a
+    /// release bundle (or any folder that cannot build them).
+    public var sourceCheckout: URL?
 
-    public init(openComposite: URL, proxy: URL) {
+    public init(openComposite: URL, proxy: URL, sourceCheckout: URL?) {
         self.openComposite = openComposite
         self.proxy = proxy
+        self.sourceCheckout = sourceCheckout
     }
 
     public static let openCompositeBuildCommand = "runtime/scripts/build-opencomposite.zsh"
     public static let proxyBuildCommand = "runtime/scripts/test-openvr-proxy.zsh"
 
-    /// Why setup for `kind` cannot start yet, with the command that fixes it; nil when the
-    /// files it needs exist. Only checks that they exist; Prepare VR validates their contents.
+    /// True when Basalt runs from a source checkout, the only place OpenComposite can be built.
+    public var isSourceCheckout: Bool { sourceCheckout != nil }
+
+    /// Why setup for `kind` cannot start, with what fixes it; nil when the files it needs
+    /// exist. Only checks that they exist; Prepare VR validates their contents. Outside a
+    /// source checkout it says that this setup works only from one.
     public func missingProblem(for kind: VRRuntimeKind,
                                fileManager: FileManager = .default) -> String? {
         guard kind != .openXR else { return nil }
-        if !fileManager.fileExists(atPath: openComposite.path) {
-            return "OpenComposite is not built on this Mac yet. Basalt does not download it. Run \(Self.openCompositeBuildCommand) in the BasaltVR folder, then Prepare VR again."
+        let missingOpenComposite = !fileManager.fileExists(atPath: openComposite.path)
+        let missingProxy = kind == .alyx && !fileManager.fileExists(atPath: proxy.path)
+        guard missingOpenComposite || missingProxy else { return nil }
+        guard let sourceCheckout else {
+            let game = kind == .alyx ? "Half-Life: Alyx" : "OpenVR games"
+            let commands = kind == .alyx
+                ? "\(Self.openCompositeBuildCommand) and \(Self.proxyBuildCommand)"
+                : Self.openCompositeBuildCommand
+            return "Prepare VR for \(game) works only when Basalt runs from a BasaltVR source checkout. Release builds do not include OpenComposite: it is GPLv3 software, and Basalt does not ship or download it. To use it, get the BasaltVR source, run \(commands) in it, and start Basalt from that folder with make app. Native OpenXR games and Restore Game Files… work in this copy of Basalt."
         }
-        if kind == .alyx, !fileManager.fileExists(atPath: proxy.path) {
-            return "Half-Life: Alyx needs Basalt's OpenVR proxy, which is not built yet. Run \(Self.proxyBuildCommand) in the BasaltVR folder, then Prepare VR again."
+        if missingOpenComposite {
+            return "OpenComposite is not built on this Mac yet. Basalt does not download it. Run \(Self.openCompositeBuildCommand) in \(sourceCheckout.path), then Prepare VR again."
         }
-        return nil
+        return "Half-Life: Alyx needs Basalt's OpenVR proxy, which is not built yet. Run \(Self.proxyBuildCommand) in \(sourceCheckout.path), then Prepare VR again."
     }
 
     /// The outputs of `build-opencomposite.zsh` and `test-openvr-proxy.zsh` in `repoRoot`.
-    public static func local(repoRoot: URL) -> VRArtifacts {
-        VRArtifacts(
+    /// `repoRoot` counts as a source checkout only when it has the source layout.
+    public static func local(repoRoot: URL, fileManager: FileManager = .default) -> VRArtifacts {
+        let isSource = RepositoryLocator.layout(of: repoRoot, fileManager: fileManager) == .source
+        return VRArtifacts(
             openComposite: repoRoot.appendingPathComponent(
                 "runtime/build/opencomposite/out/openvr_api.dll"),
             proxy: repoRoot.appendingPathComponent(
-                "runtime/build/openvr-proxy/bin/openvr_api.dll"))
+                "runtime/build/openvr-proxy/bin/openvr_api.dll"),
+            sourceCheckout: isSource ? repoRoot : nil)
     }
 }
 

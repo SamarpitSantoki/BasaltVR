@@ -32,7 +32,16 @@ final class VRSetupTests: XCTestCase {
         try encoder.encode(bottle).write(to: directory.appendingPathComponent("bottle.json"))
         manager = BottleManager(root: root, repoRoot: temporary.appendingPathComponent("repo"))
 
-        artifacts = VRArtifacts.local(repoRoot: temporary.appendingPathComponent("repo"))
+        // A source checkout, the only place Basalt finds OpenComposite.
+        let repo = temporary.appendingPathComponent("repo", isDirectory: true)
+        for marker in ["runtime/CMakeLists.txt", "streamer/Package.swift"] {
+            let url = repo.appendingPathComponent(marker)
+            try fm.createDirectory(at: url.deletingLastPathComponent(),
+                                   withIntermediateDirectories: true)
+            try Data().write(to: url)
+        }
+        artifacts = VRArtifacts.local(repoRoot: repo)
+        XCTAssertTrue(artifacts.isSourceCheckout)
         try fm.createDirectory(at: artifacts.openComposite.deletingLastPathComponent(),
                                withIntermediateDirectories: true)
         try fm.createDirectory(at: artifacts.proxy.deletingLastPathComponent(),
@@ -283,6 +292,80 @@ final class VRSetupTests: XCTestCase {
         XCTAssertFalse(fm.fileExists(atPath: dll.appendingPathExtension("basalt-original").path))
         XCTAssertEqual(manager.vrSetupStatus(profileName: "alyx"), .notPrepared)
         XCTAssertEqual(try manager.loadProfile("alyx").arguments, ["-novid", "-g", "D3D11", "-vulkan"])
+    }
+
+    func testSourceCheckoutArtifactsNameTheBuildCommandAndTheCheckout() throws {
+        let repo = try XCTUnwrap(artifacts.sourceCheckout)
+        XCTAssertNil(artifacts.missingProblem(for: .openVR))
+        XCTAssertNil(artifacts.missingProblem(for: .alyx))
+        try fm.removeItem(at: artifacts.proxy)
+        XCTAssertNil(artifacts.missingProblem(for: .openVR))
+        let proxyProblem = try XCTUnwrap(artifacts.missingProblem(for: .alyx))
+        XCTAssertTrue(proxyProblem.contains(VRArtifacts.proxyBuildCommand), proxyProblem)
+        XCTAssertTrue(proxyProblem.contains(repo.path), proxyProblem)
+        try fm.removeItem(at: artifacts.openComposite)
+        let problem = try XCTUnwrap(artifacts.missingProblem(for: .openVR))
+        XCTAssertTrue(problem.contains(VRArtifacts.openCompositeBuildCommand), problem)
+        XCTAssertTrue(problem.contains(repo.path), problem)
+        XCTAssertFalse(problem.contains("source checkout"), problem)
+        XCTAssertNil(artifacts.missingProblem(for: .openXR))
+    }
+
+    func testReleaseBundleSaysPrepareVRNeedsASourceCheckout() throws {
+        // A release's support folder: runtime and docs, never OpenComposite or the proxy.
+        let support = temporary.appendingPathComponent("BasaltVR.app/Contents/Resources/BasaltVR",
+                                                       isDirectory: true)
+        for file in ["BasaltVR.support.json", "runtime/build/bin/basalt_openxr.dll",
+                     "runtime/build/bin/basalt_openxr.json", "docs/BOTTLES.md"] {
+            let url = support.appendingPathComponent(file)
+            try fm.createDirectory(at: url.deletingLastPathComponent(),
+                                   withIntermediateDirectories: true)
+            try Data().write(to: url)
+        }
+        XCTAssertEqual(RepositoryLocator.layout(of: support), .packaged)
+        let release = VRArtifacts.local(repoRoot: support)
+        XCTAssertFalse(release.isSourceCheckout)
+        XCTAssertNil(release.sourceCheckout)
+        for kind in [VRRuntimeKind.openVR, .alyx] {
+            let problem = try XCTUnwrap(release.missingProblem(for: kind))
+            XCTAssertTrue(problem.contains("source checkout"), problem)
+            XCTAssertTrue(problem.contains("GPLv3"), problem)
+            XCTAssertTrue(problem.contains(VRArtifacts.openCompositeBuildCommand), problem)
+            XCTAssertEqual(problem.contains(VRArtifacts.proxyBuildCommand), kind == .alyx, problem)
+        }
+        // Native OpenXR needs no artifact in any build.
+        XCTAssertNil(release.missingProblem(for: .openXR))
+        // A folder that is neither layout is not a source checkout either.
+        XCTAssertFalse(VRArtifacts.local(repoRoot: temporary.appendingPathComponent("nowhere"))
+            .isSourceCheckout)
+
+        // Prepare stops with the same message and changes nothing.
+        let (location, dll, valve) = try alyxFixture()
+        XCTAssertThrowsError(try manager.prepareVR(
+            profileName: "alyx", location: location, mode: .auto, artifacts: release,
+            replaceCustomFiles: true)) {
+            XCTAssertTrue($0.localizedDescription.contains("source checkout"), $0.localizedDescription)
+        }
+        XCTAssertEqual(try Data(contentsOf: dll), valve)
+        XCTAssertEqual(manager.vrSetupStatus(profileName: "alyx"), .notPrepared)
+
+        // Files that exist are used, even outside a source checkout.
+        let placed = VRArtifacts(openComposite: artifacts.openComposite, proxy: artifacts.proxy,
+                                 sourceCheckout: nil)
+        XCTAssertNil(placed.missingProblem(for: .alyx))
+    }
+
+    func testRestoreNeedsNoArtifacts() throws {
+        let (location, dll, valve) = try alyxFixture()
+        try manager.prepareVR(profileName: "alyx", location: location, mode: .auto,
+                              artifacts: artifacts, replaceCustomFiles: true)
+        // The build folder is gone, as in a release bundle.
+        try fm.removeItem(at: temporary.appendingPathComponent("repo/runtime/build"))
+        XCTAssertNotNil(artifacts.missingProblem(for: .alyx))
+        let report = try manager.restoreVR(profileName: "alyx")
+        XCTAssertTrue(report.isComplete)
+        XCTAssertEqual(try Data(contentsOf: dll), valve)
+        XCTAssertEqual(manager.vrSetupStatus(profileName: "alyx"), .notPrepared)
     }
 
     // MARK: - OpenVR and OpenXR

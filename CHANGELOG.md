@@ -82,6 +82,10 @@ before each session). The streamer reports a mismatched DLL instead of connectin
   records hashes in `VRSetup/<profile>.json`. The status is re-checked on every refresh, so a
   Steam update that restores Valve's DLL shows **VR FILES CHANGED**. **Restore Game Files…**
   undoes the setup. "Setup ready" only means the files are in place. See `docs/MANAGEMENT.md`.
+- Prepare VR is clearly source-checkout-only for OpenVR games and Half-Life: Alyx. A release
+  bundle does not include OpenComposite (GPLv3), so the sheet says so up front, keeps Prepare VR
+  disabled, and explains how to build OpenComposite in a source checkout. Native OpenXR setup and
+  **Restore Game Files…** still work there.
 
 ### Changed
 
