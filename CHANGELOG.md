@@ -94,6 +94,15 @@ All notable changes to BasaltVR are documented here.
 - Recentering also queues reference-space-change events for existing STAGE and LOCAL_FLOOR
   spaces; a full event queue never drops session-state changes and reports
   `XrEventDataEventsLost`; swapchain wait/release follow acquire order.
+- Stopping the streamer during the USB headset handshake, or a failed start, now restores the Mac
+  audio output and removes the adb forwards instead of leaving them behind.
+- A closed USB video stream no longer spins the streamer at 100% CPU.
+- Out-of-range headset values (encoding gamma, latency statistics, IPD/FOV calibration, button
+  path or controller profile 0) are ignored instead of crashing the streamer or making the runtime
+  drop its control connection.
+- A restarted OpenXR session can replace the runtime connection before the old one closes, and a
+  connection that never sends its Hello is dropped after 5 seconds.
+- `basaltctl run` no longer reads its own options from game arguments after `--`.
 
 ### Project maintenance
 
