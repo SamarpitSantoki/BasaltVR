@@ -86,6 +86,10 @@ before each session). The streamer reports a mismatched DLL instead of connectin
   bundle does not include OpenComposite (GPLv3), so the sheet says so up front, keeps Prepare VR
   disabled, and explains how to build OpenComposite in a source checkout. Native OpenXR setup and
   **Restore Game Files…** still work there.
+- After a game update replaces the `openvr_api.dll` Basalt installed, Restore keeps the new DLL
+  and retires the old `openvr_api.dll.basalt-original` (removed only when an identical copy is
+  kept, otherwise renamed to `.basalt-stale-original-<time>`). Prepare VR also takes such a newer
+  DLL as the original. A later Restore no longer writes the old DLL over the updated game.
 
 ### Changed
 

@@ -85,9 +85,13 @@ shows the session state with a Stop button.
      stays disabled for OpenVR and Alyx, and the message says to build OpenComposite in a
      BasaltVR source checkout and start the app from there. Native OpenXR setup and **Restore
      Game Files…** need no build and work in every copy.
-   - The game's first `openvr_api.dll` is kept as `openvr_api.dll.basalt-original` and never
-     replaced by a later setup. Files Basalt did not write (including the game's first
-     `openvr_api.dll`, a custom `openvr_api_opencomposite.dll`, or an edited
+   - The game's `openvr_api.dll` is kept as `openvr_api.dll.basalt-original`. A later setup keeps
+     that original while the game still has Basalt's DLL or the original. When the game's DLL
+     changed after the original was kept (often a game update), that newer DLL becomes the
+     original after **Replace and Keep Copies**, and the older original is kept: it is removed
+     only when an identical `.basalt-replaced-…` copy exists, otherwise it is renamed to
+     `openvr_api.dll.basalt-stale-original-<UTC time>`. Files Basalt did not write (including
+     the game's first `openvr_api.dll`, a custom `openvr_api_opencomposite.dll`, or an edited
      `opencomposite.ini`) stop the setup with nothing changed. **Replace and Keep Copies** then
      saves each as `<name>.basalt-replaced-<UTC time>` before replacing it, with a numeric suffix
      when needed so earlier copies are never overwritten. Add Game asks in the same sheet;
@@ -105,7 +109,11 @@ shows the session state with a Stop button.
      that needs a headset test.
    - **Restore Game Files…** puts the original DLL back, removes the files Basalt installed and
      its argument changes, and deletes the record. Files that changed after setup are left alone
-     and listed, and the `.basalt-replaced-…` copies are kept. If the original DLL backup is
+     and listed, and the `.basalt-replaced-…` copies are kept. When a game update replaced
+     Basalt's `openvr_api.dll`, Restore leaves the newer DLL and retires the old original in the
+     same way (removed only when an identical copy is kept, otherwise renamed to
+     `openvr_api.dll.basalt-stale-original-<UTC time>`), so the next Prepare VR takes the newer
+     DLL as the original and a later Restore never puts the old one back. If the original DLL backup is
      missing, Restore keeps that folder's complete setup and record for a later retry and
      reports that restoration is incomplete. Unedited arguments return to their exact original order.
 5. **Profiles** can edit their source, Windows executable, working directory, arguments, and

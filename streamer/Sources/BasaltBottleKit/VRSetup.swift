@@ -116,6 +116,12 @@ public struct VRPrepareResult: Equatable, Sendable {
     public var targets: [URL]
     public var replacedCopies: [URL]
     public var status: VRSetupStatus
+    /// Game DLLs that changed after the original was kept (often a game update). Each is now
+    /// the original that Restore puts back.
+    public var updatedByGame: [URL] = []
+    /// Where each older original now is: a new `openvr_api.dll.basalt-stale-original-<time>`, or
+    /// an identical copy Basalt already kept.
+    public var staleOriginals: [URL] = []
 }
 
 public struct VRRestoreReport: Equatable, Sendable {
@@ -126,6 +132,12 @@ public struct VRRestoreReport: Equatable, Sendable {
     /// Game DLLs Basalt could not put back because `openvr_api.dll.basalt-original` is
     /// missing. Their setup stays in place and recorded, so Restore can run again later.
     public var unrestored: [URL] = []
+    /// Game DLLs the game replaced after setup (often a Steam update). Restore leaves them, and
+    /// they are also in `kept`. Their old originals are no longer used.
+    public var updatedByGame: [URL] = []
+    /// Where each retired original now is: a new `openvr_api.dll.basalt-stale-original-<time>`,
+    /// or an identical copy Basalt already kept.
+    public var staleOriginals: [URL] = []
 
     public var isComplete: Bool { unrestored.isEmpty }
 }
@@ -135,16 +147,26 @@ public struct VRRestoreReport: Equatable, Sendable {
 /// a custom OpenComposite beside the proxy, or an edited `opencomposite.ini`.
 public struct VRCustomFilesError: LocalizedError, Equatable {
     public let files: [URL]
+    /// Game DLLs that differ from the original Basalt kept (often a game update). Replacing one
+    /// makes it the new original and retires the old one.
+    public var updatedByGame: [URL] = []
 
     public var errorDescription: String? {
         let names = files.map { "• " + $0.path }.joined(separator: "\n")
-        return "Basalt did not write these files and cannot tell if they are the game's own or a custom setup, so Prepare VR changed nothing:\n\(names)\nReplace them only if you want Basalt's setup. Basalt keeps a copy of each, and Restore puts the game's openvr_api.dll back."
+        var text = "Basalt did not write these files and cannot tell if they are the game's own or a custom setup, so Prepare VR changed nothing:\n\(names)\nReplace them only if you want Basalt's setup. Basalt keeps a copy of each, and Restore puts the game's openvr_api.dll back."
+        if !updatedByGame.isEmpty {
+            let folders = updatedByGame.map { $0.deletingLastPathComponent().path }
+                .joined(separator: ", ")
+            text += "\nThe openvr_api.dll in \(folders) is not the original Basalt kept. A game update often does this. If you replace it, Basalt keeps this newer DLL as the original that Restore puts back, and keeps the older original as openvr_api.dll.basalt-stale-original-<time>."
+        }
+        return text
     }
 }
 
 extension BottleManager {
     static let openCompositeININame = "opencomposite.ini"
     static let originalSuffix = "basalt-original"
+    static let staleOriginalLabel = "basalt-stale-original"
 
     /// True when a Wine command line starts Steam's own `steam.exe` (any folder, any case),
     /// so the game is the one `-applaunch` names, not the executable itself.
@@ -322,16 +344,10 @@ extension BottleManager {
         var newFiles = [Write]()
         var copies = [URL]()
         var reserved = Set<String>()
+        var updatedByGame = [URL]()
+        var staleOriginals = [URL]()
         func copyURL(for url: URL) -> URL {
-            let base = url.path + ".basalt-replaced-\(stamp)"
-            var candidate = base
-            var number = 2
-            while reserved.contains(candidate) || pathExists(candidate) {
-                candidate = "\(base)-\(number)"
-                number += 1
-            }
-            reserved.insert(candidate)
-            return URL(fileURLWithPath: candidate)
+            unusedURL(url.path + ".basalt-replaced-\(stamp)", reserved: &reserved)
         }
 
         for dll in normalizedTargets {
@@ -345,6 +361,7 @@ extension BottleManager {
                     "\(url.path) is a symbolic link. Basalt will not write through it.")
             }
             let dllBytes = kind == .alyx ? proxyBytes! : openCompositeBytes
+            let earlier = existing?.targets.first { $0.dll == dll.path }
             var backupPath: String?
             var targetCopies = [String]()
             func keepCopy(of url: URL, data: Data) {
@@ -379,9 +396,24 @@ extension BottleManager {
                         keepCopy(of: dll, data: current)
                         newFiles.append(Write(url: backup, data: current))
                         backupPath = backup.path
-                    } else if current != backupBytes {
+                    } else if let backupBytes, current != backupBytes {
+                        // The DLL changed after the original was kept: a game update, or a DLL
+                        // put there by hand. It is what the game has now, so it becomes the
+                        // original that Restore puts back. The old original is never lost.
                         custom.append(dll)
                         keepCopy(of: dll, data: current)
+                        updatedByGame.append(dll)
+                        if let kept = keptCopy(identicalTo: backupBytes,
+                                               among: earlier?.replacedCopies ?? []) {
+                            staleOriginals.append(kept)
+                        } else {
+                            let stale = unusedURL(
+                                dll.path + ".\(Self.staleOriginalLabel)-\(stamp)", reserved: &reserved)
+                            newFiles.append(Write(url: stale, data: backupBytes))
+                            targetCopies.append(stale.path)
+                            staleOriginals.append(stale)
+                        }
+                        writes.append(Write(url: backup, data: current))
                     }
                 }
             } else if fileManager.fileExists(atPath: backup.path) {
@@ -409,13 +441,12 @@ extension BottleManager {
                 files.append(.init(path: proxied.path, sha256: Self.sha256(openCompositeBytes)))
             }
             files.append(.init(path: ini.path, sha256: Self.sha256(iniBytes)))
-            let earlier = existing?.targets.first { $0.dll == dll.path }
             recordTargets.append(VRSetupRecord.Target(
                 dll: dll.path, backup: backupPath ?? earlier?.backup, files: files,
                 replacedCopies: (earlier?.replacedCopies ?? []) + targetCopies))
         }
         if !custom.isEmpty && !replaceCustomFiles {
-            throw VRCustomFilesError(files: custom)
+            throw VRCustomFilesError(files: custom, updatedByGame: updatedByGame)
         }
 
         // Launch arguments: Alyx starts in VR on D3D11 (DXMT has no Vulkan path to Basalt).
@@ -460,7 +491,8 @@ extension BottleManager {
             }
             return VRPrepareResult(
                 kind: kind, targets: normalizedTargets,
-                replacedCopies: copies, status: status)
+                replacedCopies: copies, status: status,
+                updatedByGame: updatedByGame, staleOriginals: staleOriginals)
         } catch {
             transaction.rollBack()
             throw error
@@ -562,8 +594,13 @@ extension BottleManager {
     /// `openvr_api.dll.basalt-original` is gone, that target keeps its whole setup (DLL, proxied
     /// OpenComposite, ini), the record keeps it, and the launch arguments stay, so the game still
     /// has a working setup and Restore can run again once the original is back.
+    ///
+    /// When the game replaced Basalt's DLL after setup (often a Steam update), Restore leaves the
+    /// new DLL and retires `openvr_api.dll.basalt-original`, so a later Prepare keeps the new DLL
+    /// as the original. The old original is removed only when Basalt already keeps an identical
+    /// copy; otherwise it becomes `openvr_api.dll.basalt-stale-original-<time>[-n]`.
     @discardableResult
-    public func restoreVR(profileName: String) throws -> VRRestoreReport {
+    public func restoreVR(profileName: String, now: Date = Date()) throws -> VRRestoreReport {
         guard var record = try loadVRSetupRecord(profileName) else {
             throw BottleToolError("'\(profileName)' has no VR setup to restore.")
         }
@@ -572,6 +609,10 @@ extension BottleManager {
         var restored = [URL]()
         var kept = [URL]()
         var unrestored = [URL]()
+        var updatedByGame = [URL]()
+        var staleOriginals = [URL]()
+        var reserved = Set<String>()
+        let stamp = Self.timestamp(now)
         var remaining = [VRSetupRecord.Target]()
         let transaction = FileTransaction(fileManager: fileManager)
         do {
@@ -620,6 +661,20 @@ extension BottleManager {
                         // A Steam update or file check already put the game's DLL back.
                         try transaction.remove(backup)
                         restored.append(url)
+                    } else if url == dll, let backupBytes {
+                        // The game replaced Basalt's DLL with a newer one. Keep it, and retire
+                        // the old original so that it never goes back over the newer DLL.
+                        if let copy = keptCopy(identicalTo: backupBytes, among: target.replacedCopies) {
+                            staleOriginals.append(copy)
+                        } else {
+                            let stale = unusedURL(
+                                dll.path + ".\(Self.staleOriginalLabel)-\(stamp)", reserved: &reserved)
+                            try transaction.create(backupBytes, at: stale)
+                            staleOriginals.append(stale)
+                        }
+                        try transaction.remove(backup)
+                        updatedByGame.append(url)
+                        kept.append(url)
                     } else {
                         kept.append(url)
                     }
@@ -642,7 +697,8 @@ extension BottleManager {
             transaction.rollBack()
             throw error
         }
-        return VRRestoreReport(restored: restored, kept: kept, unrestored: unrestored)
+        return VRRestoreReport(restored: restored, kept: kept, unrestored: unrestored,
+                               updatedByGame: updatedByGame, staleOriginals: staleOriginals)
     }
 
     /// The exact arguments from before setup while the profile still has the ones setup left;
@@ -715,6 +771,26 @@ extension BottleManager {
                                      isDirectory: &isDirectory), isDirectory.boolValue else {
             throw BottleToolError("The folder of \(dll.path) does not exist")
         }
+    }
+
+    /// `base`, or `base-2`, `base-3`, … : the first path where nothing exists and that `reserved`
+    /// does not hold yet. Adds it to `reserved`.
+    func unusedURL(_ base: String, reserved: inout Set<String>) -> URL {
+        var candidate = base
+        var number = 2
+        while reserved.contains(candidate) || pathExists(candidate) {
+            candidate = "\(base)-\(number)"
+            number += 1
+        }
+        reserved.insert(candidate)
+        return URL(fileURLWithPath: candidate)
+    }
+
+    /// The first of `paths` that is a regular file holding exactly `data`: a copy Basalt keeps,
+    /// so a file with the same bytes can go without losing anything.
+    func keptCopy(identicalTo data: Data, among paths: [String]) -> URL? {
+        paths.lazy.map { URL(fileURLWithPath: $0) }
+            .first { !self.isSymbolicLink($0) && (try? Data(contentsOf: $0)) == data }
     }
 
     /// Something is at `path`, even a link to nothing.

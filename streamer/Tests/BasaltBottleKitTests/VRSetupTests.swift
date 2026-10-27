@@ -459,7 +459,7 @@ final class VRSetupTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: copy), custom)
     }
 
-    func testUnknownDLLWithAnExistingBackupIsNotOverwritten() throws {
+    func testUnknownDLLWithAnExistingBackupBecomesTheOriginalAndKeepsTheOldOne() throws {
         let (location, dll, valve) = try alyxFixture()
         let backup = dll.appendingPathExtension("basalt-original")
         try valve.write(to: backup)
@@ -467,13 +467,123 @@ final class VRSetupTests: XCTestCase {
         try customOpenComposite.write(to: dll)
         XCTAssertThrowsError(try manager.prepareVR(
             profileName: "alyx", location: location, mode: .auto, artifacts: artifacts)) {
-            XCTAssertEqual(($0 as? VRCustomFilesError)?.files, [dll.standardizedFileURL])
+            let error = $0 as? VRCustomFilesError
+            XCTAssertEqual(error?.files, [dll.standardizedFileURL])
+            XCTAssertEqual(error?.updatedByGame, [dll.standardizedFileURL])
+            XCTAssertTrue(error?.localizedDescription.contains("basalt-stale-original") == true)
         }
         XCTAssertEqual(try Data(contentsOf: dll), customOpenComposite)
+        XCTAssertEqual(try Data(contentsOf: backup), valve)
 
-        try manager.prepareVR(profileName: "alyx", location: location, mode: .auto,
+        // The DLL in place before setup is the original now; the old one is never lost.
+        let result = try manager.prepareVR(profileName: "alyx", location: location, mode: .auto,
+                                           artifacts: artifacts, replaceCustomFiles: true)
+        XCTAssertEqual(try Data(contentsOf: backup), customOpenComposite)
+        XCTAssertEqual(result.updatedByGame, [dll.standardizedFileURL])
+        let stale = try XCTUnwrap(result.staleOriginals.first)
+        XCTAssertTrue(stale.lastPathComponent.hasPrefix("openvr_api.dll.basalt-stale-original-"))
+        XCTAssertEqual(try Data(contentsOf: stale), valve)
+
+        try manager.restoreVR(profileName: "alyx")
+        XCTAssertEqual(try Data(contentsOf: dll), customOpenComposite)
+        XCTAssertEqual(try Data(contentsOf: stale), valve)
+    }
+
+    // MARK: - Game updates after setup
+
+    private func openVRFixture() throws -> (VRGameLocation, URL) {
+        let exe = try write(Self.pe(imports: ["openvr_api.dll"], marker: 1), "Games/Upd/Upd.exe")
+        let dll = try write(Self.pe(marker: 0x51), "Games/Upd/openvr_api.dll")
+        try saveProfile("upd", executable: #"C:\Games\Upd\Upd.exe"#)
+        return (VRGameLocation(executable: exe, folder: exe.deletingLastPathComponent()),
+                dll.standardizedFileURL)
+    }
+
+    func testSteamUpdateThenRestoreThenPrepareThenRestoreKeepsTheUpdatedDLL() throws {
+        let (location, dll) = try openVRFixture()
+        let backup = dll.appendingPathExtension("basalt-original")
+        let first = try manager.prepareVR(profileName: "upd", location: location, mode: .auto,
+                                          artifacts: artifacts, replaceCustomFiles: true)
+        let firstCopy = try XCTUnwrap(first.replacedCopies.first)
+
+        // Steam updates the game and writes its new openvr_api.dll.
+        let updated = Self.pe(marker: 0x52)
+        try updated.write(to: dll)
+
+        let report = try manager.restoreVR(profileName: "upd")
+        XCTAssertEqual(report.updatedByGame, [dll])
+        XCTAssertTrue(report.kept.contains(dll))
+        XCTAssertEqual(try Data(contentsOf: dll), updated)
+        // The old original goes: Basalt keeps an identical copy from the first setup.
+        XCTAssertFalse(fm.fileExists(atPath: backup.path))
+        XCTAssertEqual(report.staleOriginals, [firstCopy])
+        XCTAssertEqual(try Data(contentsOf: firstCopy), Self.pe(marker: 0x51))
+        XCTAssertEqual(manager.vrSetupStatus(profileName: "upd"), .notPrepared)
+
+        // The next setup keeps the updated DLL as the original.
+        try manager.prepareVR(profileName: "upd", location: location, mode: .auto,
                               artifacts: artifacts, replaceCustomFiles: true)
-        XCTAssertEqual(try Data(contentsOf: backup), valve, "the original backup is never replaced")
+        XCTAssertEqual(try Data(contentsOf: backup), updated)
+        try manager.restoreVR(profileName: "upd")
+        XCTAssertEqual(try Data(contentsOf: dll), updated)
+        XCTAssertFalse(fm.fileExists(atPath: backup.path))
+    }
+
+    func testRestoreAfterAnUpdateRenamesTheOldOriginalWhenNoCopyIsKept() throws {
+        let (location, dll) = try openVRFixture()
+        let backup = dll.appendingPathExtension("basalt-original")
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let first = try manager.prepareVR(profileName: "upd", location: location, mode: .auto,
+                                          artifacts: artifacts, replaceCustomFiles: true)
+        // The person deleted the replaced copy.
+        try fm.removeItem(at: try XCTUnwrap(first.replacedCopies.first))
+        let updated = Self.pe(marker: 0x52)
+        try updated.write(to: dll)
+
+        let report = try manager.restoreVR(profileName: "upd", now: now)
+        let stale = dll.deletingLastPathComponent().appendingPathComponent(
+            "openvr_api.dll.basalt-stale-original-\(BottleManager.timestamp(now))")
+        XCTAssertEqual(report.staleOriginals, [stale])
+        XCTAssertEqual(try Data(contentsOf: stale), Self.pe(marker: 0x51))
+        XCTAssertFalse(fm.fileExists(atPath: backup.path))
+        XCTAssertEqual(try Data(contentsOf: dll), updated)
+
+        try manager.prepareVR(profileName: "upd", location: location, mode: .auto,
+                              artifacts: artifacts, replaceCustomFiles: true)
+        try manager.restoreVR(profileName: "upd")
+        XCTAssertEqual(try Data(contentsOf: dll), updated)
+        XCTAssertEqual(try Data(contentsOf: stale), Self.pe(marker: 0x51))
+    }
+
+    func testPrepareAgainAfterAnUpdateTakesTheUpdatedDLLAsTheOriginal() throws {
+        let (location, dll) = try openVRFixture()
+        let backup = dll.appendingPathExtension("basalt-original")
+        let first = try manager.prepareVR(profileName: "upd", location: location, mode: .auto,
+                                          artifacts: artifacts, replaceCustomFiles: true)
+        let updated = Self.pe(marker: 0x52)
+        try updated.write(to: dll)
+        guard case .changed = manager.vrSetupStatus(profileName: "upd") else {
+            return XCTFail("expected changed")
+        }
+
+        // Prepare again without Restore: the record shows the DLL is not Basalt's any more.
+        XCTAssertThrowsError(try manager.prepareVR(
+            profileName: "upd", location: location, mode: .auto, artifacts: artifacts)) {
+            XCTAssertEqual(($0 as? VRCustomFilesError)?.updatedByGame, [dll])
+        }
+        XCTAssertEqual(try Data(contentsOf: backup), Self.pe(marker: 0x51))
+        let again = try manager.prepareVR(profileName: "upd", location: location, mode: .auto,
+                                          artifacts: artifacts, replaceCustomFiles: true)
+        XCTAssertEqual(again.updatedByGame, [dll])
+        XCTAssertEqual(again.staleOriginals, first.replacedCopies)
+        XCTAssertEqual(try Data(contentsOf: backup), updated)
+        XCTAssertEqual(again.replacedCopies.count, 1)
+        XCTAssertEqual(try Data(contentsOf: again.replacedCopies[0]), updated)
+
+        let report = try manager.restoreVR(profileName: "upd")
+        XCTAssertTrue(report.updatedByGame.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: dll), updated)
+        XCTAssertEqual(try Data(contentsOf: first.replacedCopies[0]), Self.pe(marker: 0x51))
     }
 
     func testRestoreLeavesFilesThatChangedAfterSetup() throws {

@@ -214,7 +214,7 @@ struct PrepareVRSheet: View {
             Button("Restore") { restore() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Basalt puts back the original openvr_api.dll, removes the files it installed, and undoes its launch-argument changes. Files that changed since setup are left alone.")
+            Text("Basalt puts back the original openvr_api.dll, removes the files it installed, and undoes its launch-argument changes. Files that changed since setup are left alone. If a game update replaced openvr_api.dll, Basalt keeps the newer DLL.")
         }
     }
 
@@ -278,12 +278,23 @@ enum VRMessages {
         if !result.replacedCopies.isEmpty {
             text += " Copies of the replaced files: " + result.replacedCopies.map(\.lastPathComponent).joined(separator: ", ") + "."
         }
+        if !result.updatedByGame.isEmpty {
+            text += " The game's openvr_api.dll changed since Basalt kept the original, so the newer DLL is the original now. "
+                + staleOriginalsSentence(result.staleOriginals)
+        }
         return text
+    }
+
+    private static func staleOriginalsSentence(_ urls: [URL]) -> String {
+        "The older original is kept as " + urls.map(\.path).joined(separator: ", ") + "."
     }
 
     static func restored(_ report: VRRestoreReport) -> String {
         let keptFolders = Set(report.unrestored.map { $0.deletingLastPathComponent().path })
-        let changed = report.kept.filter { !keptFolders.contains($0.deletingLastPathComponent().path) }
+        let updated = Set(report.updatedByGame)
+        let changed = report.kept.filter {
+            !keptFolders.contains($0.deletingLastPathComponent().path) && !updated.contains($0)
+        }
         var text: String
         if report.isComplete {
             text = "Restored the game's files."
@@ -292,6 +303,11 @@ enum VRMessages {
                 + keptFolders.sorted().joined(separator: ", ")
                 + ". Put the original back as openvr_api.dll.basalt-original, or let Steam verify the game's files, then Restore again."
             if !report.restored.isEmpty { text += " Other files were restored." }
+        }
+        if !report.updatedByGame.isEmpty {
+            text += " The game updated " + report.updatedByGame.map(\.path).joined(separator: ", ")
+                + " after setup, so Basalt left the newer DLL in place and will treat it as the original next time. "
+                + staleOriginalsSentence(report.staleOriginals)
         }
         if !changed.isEmpty {
             text += " Left alone because they changed after setup: "
