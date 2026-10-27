@@ -257,6 +257,16 @@ extension AlvrHeadPose {
 
 // MARK: - Pose conversions
 
+/// Which grip pose the runtime exposes for a Touch controller.
+public enum ControllerGripPose: String, CaseIterable, Sendable {
+    /// What the ALVR client reports: Meta's grip times ALVR's SteamVR grip
+    /// offset (-15° pitch, 5 mm). The pose before hand-tracking support.
+    case alvr
+    /// Meta's OpenXR grip pose: ALVR's offset removed
+    /// (`AlvrGripPose.controllerGrip(fromALVR:hand:)`).
+    case meta
+}
+
 /// Converts what ALVR reports for a hand into the OpenXR grip pose that the
 /// Basalt runtime exposes as `/input/grip/pose`.
 public enum AlvrGripPose {
@@ -265,7 +275,8 @@ public enum AlvrGripPose {
     /// interaction.rs`): 5 mm and a -15° pitch, chosen for ALVR's SteamVR
     /// driver, which then adds its own `[0, 0, -0.11]` offset. OpenXR games
     /// and OpenComposite expect Meta's grip and apply their own grip-to-
-    /// SteamVR transform, so the ALVR offset must be removed here.
+    /// SteamVR transform, so `ControllerGripPose.meta` removes the ALVR
+    /// offset here.
     /// Quest 2/3/3S/Pro values; the right hand mirrors x.
     static func alvrClientOffset(_ hand: AlvrHand) -> (rotation: simd_quatf, position: SIMD3<Float>) {
         let rotation = simd_quatf(angle: -15 * .pi / 180, axis: SIMD3(1, 0, 0))
@@ -591,8 +602,8 @@ public struct AlvrHandGestureRecognizer: Sendable {
 
 /// Turns ALVR tracking, buttons, and interaction profiles into what the
 /// runtime should see, per hand:
-/// - Controller in hand: Meta's grip pose (ALVR's client offset removed),
-///   the client's buttons and profile.
+/// - Controller in hand: the client's pose (with `.meta`, Meta's grip pose:
+///   ALVR's client offset removed), the client's buttons and profile.
 /// - Hand tracked (no controller): an emulated Touch controller — grip from
 ///   the palm, gesture buttons, the Touch profile — plus the hand skeleton
 ///   for XR_EXT_hand_tracking. The client's buttons for that hand are held
@@ -615,6 +626,7 @@ public final class HandTrackingInputRouter: @unchecked Sendable {
 
     private let lock = NSLock()
     private let handTrackingEnabled: Bool
+    private let gripPose: ControllerGripPose
     private let clock: () -> Double
     private let outputs: Outputs
     private var handTracked: [AlvrHand: Bool] = [.left: false, .right: false]
@@ -632,11 +644,15 @@ public final class HandTrackingInputRouter: @unchecked Sendable {
 
     /// `handTrackingEnabled` false ignores hand skeletons: a hand-tracked
     /// hand is then reported as untracked (no palm pose posing as a grip).
-    public init(handTrackingEnabled: Bool, outputs: Outputs,
+    /// `gripPose` applies to controllers only; a tracked hand's grip always
+    /// comes from the palm.
+    public init(handTrackingEnabled: Bool, gripPose: ControllerGripPose = .alvr,
+                outputs: Outputs,
                 clock: @escaping () -> Double = {
                     Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000
                 }) {
         self.handTrackingEnabled = handTrackingEnabled
+        self.gripPose = gripPose
         self.outputs = outputs
         self.clock = clock
     }
@@ -699,7 +715,9 @@ public final class HandTrackingInputRouter: @unchecked Sendable {
                 // A skeleton with hand tracking off means this motion is a
                 // palm pose, not a controller: report the hand untracked.
                 if skeleton == nil, let motion = sample.motion(hand) {
-                    let grip = AlvrGripPose.controllerGrip(fromALVR: motion, hand: hand)
+                    let grip = gripPose == .meta
+                        ? AlvrGripPose.controllerGrip(fromALVR: motion, hand: hand)
+                        : motion
                     mask |= 1 << hand.rawValue
                     actions.append { [outputs] in outputs.controllerMotion(timestamp, hand, grip) }
                 }

@@ -160,10 +160,19 @@ final class OptionsTests: XCTestCase {
     }
 
     func testHandTracking() throws {
-        XCTAssertEqual(try StreamerOptions.parse([])?.handTracking, true)
-        XCTAssertEqual(try StreamerOptions.parse(["--hand-tracking", "OFF"])?.handTracking, false)
-        XCTAssertEqual(try StreamerOptions.parse(["--hand-tracking", "on"])?.handTracking, true)
+        XCTAssertEqual(try StreamerOptions.parse([])?.handTracking, false)
+        XCTAssertEqual(try StreamerOptions.parse(["--hand-tracking", "ON"])?.handTracking, true)
+        XCTAssertEqual(try StreamerOptions.parse(["--hand-tracking", "off"])?.handTracking, false)
         XCTAssertThrowsError(try StreamerOptions.parse(["--hand-tracking", "maybe"]))
+        XCTAssertThrowsError(try StreamerOptions.parse(["--hand-tracking"]))
+    }
+
+    func testGripPose() throws {
+        XCTAssertEqual(try StreamerOptions.parse([])?.gripPose, .alvr)
+        XCTAssertEqual(try StreamerOptions.parse(["--grip-pose", "META"])?.gripPose, .meta)
+        XCTAssertEqual(try StreamerOptions.parse(["--grip-pose", "alvr"])?.gripPose, .alvr)
+        XCTAssertThrowsError(try StreamerOptions.parse(["--grip-pose", "steamvr"]))
+        XCTAssertThrowsError(try StreamerOptions.parse(["--grip-pose"]))
     }
 
     func testCodec() throws {

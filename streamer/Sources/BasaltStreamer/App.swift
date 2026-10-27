@@ -663,7 +663,8 @@ struct BasaltStreamerApp {
               + ", periodic IDR every "
               + "\(options.keyframeIntervalSeconds) s, \(options.fps) fps target, "
               + "\(options.controllerPrediction.rawValue) controller prediction, "
-              + "hand tracking \(options.handTracking ? "on" : "off")"
+              + "hand tracking \(options.handTracking ? "on" : "off"), "
+              + "\(options.gripPose.rawValue) grip pose"
               + (options.profile.map { ", profile \($0.rawValue)" } ?? ""))
         if !encoder.rejectedProperties.isEmpty {
             print("  VideoToolbox ignored: " + encoder.rejectedProperties.joined(separator: ", "))
@@ -827,7 +828,8 @@ struct BasaltStreamerApp {
                 : "  \(name) hand: Touch controller")
         }
         let handInput = HandTrackingInputRouter(
-            handTrackingEnabled: options.handTracking, outputs: routerOutputs)
+            handTrackingEnabled: options.handTracking, gripPose: options.gripPose,
+            outputs: routerOutputs)
         handshake.onButtons { entries in
             handInput.handleClientButtons(entries)
         }

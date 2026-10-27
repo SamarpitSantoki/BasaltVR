@@ -395,7 +395,7 @@ final class HandTrackingTests: XCTestCase {
     func testRouterSwitchesBetweenControllerAndHandTrackingMidSession() {
         let recorder = Recorder()
         var now = 0.0
-        let router = HandTrackingInputRouter(handTrackingEnabled: true,
+        let router = HandTrackingInputRouter(handTrackingEnabled: true, gripPose: .meta,
                                              outputs: recorder.outputs(), clock: { now })
         let touch = AlvrTouchPath.questTouchProfileID
 
@@ -471,6 +471,23 @@ final class HandTrackingTests: XCTestCase {
         XCTAssertEqual(recorder.masks.last, 0)
         XCTAssertEqual(recorder.skeletons.last?.0, .right)
         XCTAssertNil(recorder.skeletons.last?.1 ?? nil)
+    }
+
+    func testRouterKeepsTheALVRGripPoseUnlessMetaIsRequested() {
+        let reported = Self.motion(SIMD3(0.2, 1, -0.3))
+        let alvr = Recorder()
+        HandTrackingInputRouter(handTrackingEnabled: false, outputs: alvr.outputs(),
+                                clock: { 0 }).handleTracking(Self.sample(right: reported))
+        XCTAssertEqual(alvr.motions.map { $0.1 }, [reported], "default: the client's pose as sent")
+        XCTAssertEqual(alvr.masks.last, 2)
+
+        let meta = Recorder()
+        HandTrackingInputRouter(handTrackingEnabled: false, gripPose: .meta,
+                                outputs: meta.outputs(), clock: { 0 })
+            .handleTracking(Self.sample(right: reported))
+        XCTAssertEqual(meta.motions.map { $0.1 },
+                       [AlvrGripPose.controllerGrip(fromALVR: reported, hand: .right)])
+        XCTAssertNotEqual(meta.motions.first?.1, reported)
     }
 
     func testRouterWithHandTrackingOffNeverUsesThePalmPoseAsAGrip() {

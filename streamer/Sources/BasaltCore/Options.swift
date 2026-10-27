@@ -50,8 +50,13 @@ public struct StreamerOptions: Equatable {
     public var codec = VideoCodec.h264
     public var controllerPrediction = ControllerPrediction.full
     /// Quest optical hand tracking: skeletons for XR_EXT_hand_tracking and an
-    /// emulated Touch controller driven by gestures.
-    public var handTracking = true
+    /// emulated Touch controller driven by gestures. Off until it has more
+    /// headset time across games, because it changes the extensions every
+    /// game sees.
+    public var handTracking = false
+    /// The Touch controller grip pose games get. `.alvr` until Meta's grip
+    /// has more headset time across games.
+    public var gripPose = ControllerGripPose.alvr
 
     public init() {}
 
@@ -89,11 +94,16 @@ public struct StreamerOptions: Equatable {
                         as far ahead as the head; alvr keeps ALVR's shorter
                         SteamVR-oriented controller prediction
           --hand-tracking <on|off>
-                        on (default): when you put a controller down, the
-                        Quest's hand tracking drives that hand (pinch =
-                        trigger, fist = grip) and games get the hand
-                        skeleton through XR_EXT_hand_tracking; off ignores
-                        tracked hands
+                        off (default) ignores tracked hands; on: when you
+                        put a controller down, the Quest's hand tracking
+                        drives that hand (pinch = trigger, fist = grip) and
+                        games get the hand skeleton through
+                        XR_EXT_hand_tracking
+          --grip-pose <alvr|meta>
+                        Touch controller grip pose: alvr (default) keeps the
+                        ALVR client's SteamVR grip offset (-15 degrees of
+                        pitch, 5 mm); meta removes it so games get Meta's
+                        OpenXR grip pose
           --bind <ip>   address to listen on (default 127.0.0.1, i.e.
                         this machine only; 0.0.0.0 accepts LAN clients
                         and exposes your screen to the network)
@@ -208,6 +218,12 @@ public struct StreamerOptions: Equatable {
                 case "off": options.handTracking = false
                 default: throw BasaltError("--hand-tracking expects on or off")
                 }
+            case "--grip-pose":
+                let value = try nextValue(for: flag).lowercased()
+                guard let gripPose = ControllerGripPose(rawValue: value) else {
+                    throw BasaltError("--grip-pose expects alvr or meta")
+                }
+                options.gripPose = gripPose
             case "--bind":
                 let host = try nextValue(for: flag)
                 guard IPv4Address(host) != nil || IPv6Address(host) != nil else {
