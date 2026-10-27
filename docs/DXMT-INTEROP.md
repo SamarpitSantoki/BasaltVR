@@ -89,6 +89,12 @@ cost the project should accept deliberately, not by default.
 - The DXMT fork can allocate both RGBA8 and BGRA8 IOSurfaces, but Basalt's current OpenXR runtime
   advertises only BGRA8/BGRA8-sRGB swapchains: `CVPixelBufferCreateWithIOSurface` rejects the
   RGBA layout, while the BGRA layout is the zero-copy CoreVideo/VideoToolbox transport format.
+  A projection frame goes zero-copy when its swapchains are exported BGRA images
+  (`B8G8R8A8_UNORM`, `_UNORM_SRGB`, or `B8G8R8A8_TYPELESS`, which is backed by UNORM) with one
+  mip, at most twice the per-view size, and positive (unflipped) image rects; the streamer crops
+  each eye by the `FrameReady` image rect, so UE4's side-by-side image stays zero-copy. Quad
+  layers, flipped (negative extent) rects, other formats, mip chains, depth, and larger images go
+  through the runtime compositor, which draws them into its own exported BGRA images.
 - PE-side data flow: `WMTTextureInfo` already round-trips through the call and has an unused
   `uint32_t reserved` out-field plus an out `mach_port` (`winemetal.h:518-532`) — the unix
   side writes `IOSurfaceGetID(surface)` into it; no new PE plumbing.

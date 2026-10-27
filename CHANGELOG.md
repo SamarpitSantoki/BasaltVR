@@ -14,7 +14,7 @@ before each session). The streamer reports a mismatched DLL instead of connectin
 - Control protocol v10: `HelloAck` carries the negotiated Quest refresh period, and `xrWaitFrame`
   paces to it instead of a fixed 72 Hz, so `--fps 90` or `--fps 120` with `--runtime` no longer
   renders 72 Hz frames for a faster display.
-- Control protocol v11 and Quest optical hand tracking (`--hand-tracking on|off`, default on). A
+- Control protocol v11 and Quest optical hand tracking (off by default, opt-in). A
   hand without a controller drives an emulated Touch controller through ALVR's gestures (pinch =
   trigger, fist = grip, other pinches = face buttons), and games get the hand skeleton through
   the new runtime extension `XR_EXT_hand_tracking`. See `docs/HAND-TRACKING.md`.
@@ -22,14 +22,14 @@ before each session). The streamer reports a mismatched DLL instead of connectin
   VPS/SPS/PPS and a `DecoderConfig` packet as ALVR's own servers send it.
   `basalt-streamer encoder-bench` measures encode time and drops for both codecs.
 - OpenVR games through a locally built OpenComposite: `runtime/scripts/build-opencomposite.zsh`
-  builds a pinned OpenComposite fork with Basalt's patches 0001–0005 (MinGW D3D11 build, MSVC
+  builds pinned upstream OpenComposite with Basalt's patches 0001–0005 (MinGW D3D11 build, MSVC
   struct-return ABI, `GetPosesForFrame`, `GetD3D9AdapterIndex`, legacy frame timing), and
   `runtime/openvr-proxy` provides an `openvr_api.dll` proxy for Valve-only exports.
   `basaltctl opencomposite install` gains `--proxy`, `--preset default|alyx`, and `--ini`, and
   writes only options OpenComposite can parse. See `docs/OPENCOMPOSITE.md`.
 - Runtime: `STAGE` reference space, `XR_KHR_visibility_mask`, action sets attached again to a
   restarted session, quad layers, and a runtime compositor that converts non-BGRA, mipmapped,
-  or oversized swapchains, sub-rects, and flipped rects into a BGRA output; up to 16 swapchains.
+  or oversized swapchains and flipped rects into a BGRA output; up to 16 swapchains.
 - The streamer survives ALVR client disconnects over USB and Wi-Fi: it ends that session, sends
   `INPUT_RESET` to the runtime, and accepts the next connection while the game keeps running.
 - Loss recovery: frames are not encoded while the transport is busy, and after a lost access
@@ -40,12 +40,10 @@ before each session). The streamer reports a mismatched DLL instead of connectin
 - `--profile m3pro`, `--idr-interval <seconds>`, `--entropy cabac|cavlc`, and
   `--controller-prediction full|alvr`; the startup log lists VideoToolbox properties that the
   encoder refused. See `docs/PERFORMANCE.md`.
-- `basaltctl steam start PROFILE` and `basaltctl profile add --game-root PATH`.
-- Scripts: `scripts/play.zsh` (one-command session over USB or Wi-Fi with `--quality`, `--codec`,
-  and Quest log capture), `scripts/steam.zsh`, `scripts/install-quest-client.zsh`,
-  `scripts/quest-wireless.zsh`, and the shared `quest-adb.zsh` and `game-processes.zsh` helpers.
-- Runtime diagnostics: `BASALT_RUNTIME_LOG` (a log file, for games started by other programs) and
-  `BASALT_HAPTIC_LOG=1`.
+- `basaltctl steam start PROFILE`.
+- Runtime diagnostics: `BASALT_RUNTIME_LOG` (a log file, for games started by other programs),
+  `BASALT_HAPTIC_LOG=1`, and `BASALT_COMPOSITOR_LOG=1` (the compositor's periodic debug readback,
+  which runs only with it).
 - Basalt DXMT fork patches 0005 (build with the Xcode 27 Metal toolchain) and 0006 (8x MSAA falls
   back to the largest supported sample count instead of failing).
 - `docs/COMPATIBILITY.md`: The Lab verified on an M3 Pro with a Quest 3 over USB and Wi-Fi.
@@ -96,6 +94,19 @@ before each session). The streamer reports a mismatched DLL instead of connectin
   it, and sends black only before the first game frame of a session.
 - The README is now a concise project overview; the streamer command-line guide (USB/Wi-Fi, audio,
   stream settings, measurements, and security model) moved to `docs/STREAMER.md`.
+- Projection frames in exported BGRA swapchains (`B8G8R8A8_UNORM`, `_UNORM_SRGB`, or
+  `B8G8R8A8_TYPELESS`) with one mip, at most twice the per-view size, and positive image rects go
+  zero-copy; the streamer crops each eye by its `imageRect`, so UE4's side-by-side image skips the
+  runtime compositor. Quad layers, flipped rects, other formats, mip chains, depth, and larger
+  images still go through it.
+- `runtime/scripts/build-opencomposite.zsh` clones upstream OpenComposite
+  (<https://gitlab.com/znixian/OpenOVR> at `cff07db`) and applies the six commits of the former
+  GitHub fork as patches, then Basalt's own, instead of cloning the fork.
+- Hand tracking (`XR_EXT_hand_tracking`) is off by default; `--hand-tracking on` turns it on. The
+  ALVR client's SteamVR grip offset is kept by default; `--grip-pose meta` removes it.
+- The Basalt DXMT fork is tagged `v0.80-basalt.2` (patches 0005 and 0006). Nothing checks the DXMT
+  version already in a bottle; run `basaltctl bottle install-dxmt <bottle>` after rebuilding, or 8x
+  MSAA games stay black.
 
 ### Fixed
 
@@ -116,14 +127,14 @@ before each session). The streamer reports a mismatched DLL instead of connectin
   call got a newer sample (head poses arrive at about 216 Hz), and the last call set the frame's
   timestamp. The game rendered with an older pose than the timestamp named, so ALVR reprojected
   from the wrong pose and the world wobbled a little all the time. hello_xr locates once per
-  frame and was not affected. The runtime log prints a `head pose pinning:` line every 5 s: the
-  number of frames where a later head query saw a newer sample (these frames had the wrong
-  timestamp before this fix).
+  frame and was not affected. With `BASALT_RUNTIME_LOG` set, the runtime log prints a
+  `head pose pinning:` line every 5 s: the number of frames where a later head query saw a newer
+  sample (these frames had the wrong timestamp before this fix).
 - A slow game (The Lab's Secret Shop) or any hitch over 0.5 s no longer flickers between the game
   image and black.
-- Touch controller poses no longer carry the ALVR client's SteamVR-only grip offset (-15° pitch,
-  5 mm), which OpenComposite stacked with its own transform. A hand-tracked hand no longer uses its
-  raw palm pose as a controller grip.
+- Touch controller poses can drop the ALVR client's SteamVR-only grip offset (-15° pitch, 5 mm),
+  which OpenComposite stacked with its own transform (opt-in; the offset is kept by default). A
+  hand-tracked hand no longer uses its raw palm pose as a controller grip.
 - Haptics: zero amplitude is a stop, durations of zero or less play a 5 ms pulse, and
   out-of-range values from OpenVR translation layers are normalized instead of failing.
 - The runtime's control socket is no longer inherited by child processes, and a newer

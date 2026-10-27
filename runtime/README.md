@@ -16,8 +16,9 @@ feature level 11.0 plus D3D11 NT-handle create, reopen, GPU copy, and readback. 
 the runtime returns the DXGI adapter LUID, validates the application's D3D11 session binding, and
 implements up to 16 independent three-image swapchains with format enumeration and
 acquire/wait/release. Only `DXGI_FORMAT_B8G8R8A8_UNORM` and `_UNORM_SRGB` are advertised, so engines
-that choose from the list (Unity) stay on the zero-copy path. Other color/depth formats (RGBA8,
-BGRX8, 10-bit, float, typeless), mip chains, and sizes up to 4096 are still accepted by
+that choose from the list (Unity) stay on the zero-copy path; `B8G8R8A8_TYPELESS` (backed by UNORM)
+is accepted and stays zero-copy too. Other color/depth formats (RGBA8, BGRX8, 10-bit, float, other
+typeless formats), mip chains, and sizes up to 4096 are still accepted by
 `xrCreateSwapchain` and converted by the runtime compositor, for OpenVR-translation layers such as
 OpenComposite that never enumerate. This deliberately goes beyond the spec's
 `XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED`. Set `BASALT_ADVERTISE_ALL_FORMATS=1` to advertise every
@@ -79,10 +80,14 @@ runtime logs `right system button pressed` to stderr when ALVR forwards the butt
 flags, session ownership of the layer space and each subimage swapchain, per-view poses and
 FOV, in-bounds image rects (`XR_ERROR_SWAPCHAIN_RECT_INVALID`; a negative extent flips that axis),
 the 16-layer minimum limit (`XR_ERROR_LAYER_LIMIT_EXCEEDED`), and that every referenced swapchain
-has a released image. Quad layers are accepted too. Frames the streamer cannot read directly
-(non-BGRA, mipmapped, or oversized swapchains, quad layers, sub-rects, flipped rects) are drawn by
-the runtime compositor into a BGRA output swapchain; plain BGRA projection frames skip it. Other
-layer types and extension layers are rejected. With the Basalt DXMT fork and an authenticated
+has a released image. Quad layers are accepted too. A projection frame goes zero-copy to the
+streamer when its swapchains are exported BGRA images (`B8G8R8A8_UNORM`, `_UNORM_SRGB`, or
+`B8G8R8A8_TYPELESS`, which is backed by UNORM) with one mip, at most twice the per-view size, and
+positive (unflipped) image rects. The streamer crops each eye by its `imageRect`, so UE4's
+side-by-side image (both eyes in one swapchain) stays zero-copy. Quad layers, flipped (negative
+extent) rects, other formats, mip chains, depth, and larger images go through the runtime
+compositor, which draws them into a BGRA output swapchain. Other layer types and extension layers
+are rejected. With the Basalt DXMT fork and an authenticated
 control connection, accepted projection layers are fence-gated and forwarded by IOSurfaceID to
 the native Swift streamer for stereo composition and encoding. This path is machine-verified and
 has a Basalt-shaped visible wired-headset diagnostic. The pinned official Khronos `hello_xr`
@@ -194,8 +199,8 @@ runtime/scripts/test-khr-hello-xr-headset.zsh
 
 It reads the same `BASALT_HEADSET_FPS`, `BASALT_HEADSET_MBPS`, and `BASALT_HEADSET_RESOLUTION`
 variables, plus `BASALT_HEADSET_STREAMER_ARGS` for extra streamer flags (split on spaces, for
-example `'--idr-interval 10 --entropy cavlc'`), and `BASALT_HEADSET_TRANSPORT=usb|wifi|auto`
-(default `auto`). See [performance](../docs/PERFORMANCE.md) for what to measure.
+example `'--idr-interval 10 --entropy cavlc'`). It streams over USB (`--wired`). See
+[performance](../docs/PERFORMANCE.md) for what to measure.
 
 The target uses only small MinGW SDK compatibility headers; the upstream sample sources are not
 rewritten. It has completed a live Quest run through `FOCUSED`, two D3D11 eye swapchains, localized
@@ -244,10 +249,14 @@ checks the OpenVR proxy; see [OpenComposite](../docs/OPENCOMPOSITE.md).
 
 - `BASALT_RUNTIME_LOG` names a file (a Windows path, or a host path starting with `/`) to which
   the runtime appends its `Basalt OpenXR` diagnostic lines in addition to stderr. A game started by
-  another program has no stderr in the session log, so this file is its only record.
-  `scripts/play.zsh` sets it to `~/Library/Logs/BasaltVR/runtime-<time>.log`.
+  another program has no stderr in the session log, so this file is its only record. Only when it
+  is set, the runtime also logs a `head pose pinning:` line every 5 s: how many frames had a later
+  head query see a newer sample than the one pinned for that frame.
 - `BASALT_HAPTIC_LOG=1` writes every haptic call to stderr: the game's values, the target hands,
   the result, and the values sent.
+- `BASALT_COMPOSITOR_LOG=1` turns on the runtime compositor's periodic debug readback: every 2 s
+  it copies the centre texel of the left source and output images and logs it. Without it the
+  compositor reads nothing back.
 - `BASALT_ADVERTISE_ALL_FORMATS=1` advertises every swapchain format the compositor accepts,
   not only the BGRA pair, for testing.
 

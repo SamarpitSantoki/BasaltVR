@@ -194,10 +194,13 @@ forwards haptics as described in M4 below.
 
 `xrEndFrame` now validates and accepts stereo projection layers — layer flags, space and
 swapchain session ownership, per-view poses/FOV, in-bounds image rects, the 16-layer limit,
-and a released image in every referenced swapchain. Quad layers, sub-rects, flipped (negative
-extent) rects, and non-BGRA, mipmapped, or oversized swapchains — all of which OpenComposite
-produces — are drawn by a runtime-side D3D11 compositor into a BGRA output swapchain that is
-handed off like an application swapchain; plain BGRA projection frames skip it.
+and a released image in every referenced swapchain. A projection frame goes zero-copy when its
+swapchains are exported BGRA images (`B8G8R8A8_UNORM`, `_UNORM_SRGB`, or `B8G8R8A8_TYPELESS`,
+which is backed by UNORM) with one mip, at most twice the per-view size, and positive (unflipped)
+image rects; the streamer crops each eye by its `imageRect`, so UE4's side-by-side image stays
+zero-copy. Quad layers, flipped (negative extent) rects, other formats, mip chains, depth, and
+larger images — OpenComposite produces several of these — are drawn by a runtime-side D3D11
+compositor into a BGRA output swapchain that is handed off like an application swapchain.
 As of 2026-07-18 accepted layers ARE consumed: with the Basalt DXMT fork
 (`runtime/dxmt-fork`, IOSurface-backed swapchain textures) and the control socket
 (`runtime/pe/control.cpp`, protocol in `docs/DXMT-INTEROP.md` §4), every layered
@@ -272,11 +275,11 @@ roughly 14 seconds of rendering, and clean `STOPPING→IDLE→EXITING` teardown.
 the live Quest gate now verifies fused, level/world-fixed visuals, 6DoF controller response, analog
 squeeze, and squeeze-triggered haptics at 72 fps. M4 is complete.
 
-Later additions: the streamer removes the ALVR client's SteamVR-only grip offset so the runtime
-exposes Meta's Touch grip pose, haptic values from OpenVR translation layers are normalized
-instead of rejected, and control protocol v11 forwards Quest optical hand tracking as
-`XR_EXT_hand_tracking` plus a gesture-emulated Touch controller. See
-[HAND-TRACKING.md](HAND-TRACKING.md).
+Later additions: the streamer can remove the ALVR client's SteamVR-only grip offset so the
+runtime exposes Meta's Touch grip pose (opt-in; the offset is kept by default), haptic values from
+OpenVR translation layers are normalized instead of rejected, and control protocol v11 forwards
+Quest optical hand tracking (off by default, opt-in) as `XR_EXT_hand_tracking` plus a
+gesture-emulated Touch controller. See [HAND-TRACKING.md](HAND-TRACKING.md).
 
 ### M5 — Wine bottle tooling ✅
 The `basaltctl` Swift CLI creates and lists managed bottles, discovers pinned Wine,

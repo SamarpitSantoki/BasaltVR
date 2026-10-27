@@ -124,7 +124,7 @@ pull request.
 | [`streamer/`](streamer) | Swift package: `basalt-streamer` (encode + ALVR transport), `basaltctl` (bottles and profiles), and the `BasaltVR` manager app |
 | [`runtime/`](runtime) | The Windows OpenXR runtime (C++, cross-built with MinGW), its Wine/DXMT test suites, and the Basalt DXMT fork patches |
 | [`packaging/`](packaging) | App bundle and release archive tooling |
-| [`scripts/`](scripts) | `doctor`, the `check` quality gate, and the `play`, Steam, and Quest helper scripts |
+| [`scripts/`](scripts) | `doctor`, the `check` quality gate, and the Markdown link check |
 | [`docs/`](docs) | Design notes and user guides |
 
 ## Documentation

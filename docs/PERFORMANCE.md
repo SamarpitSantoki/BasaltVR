@@ -6,12 +6,10 @@ Other Macs will differ; compare one setting at a time from a cool headset.
 
 ## Recommended settings
 
-`scripts/play.zsh` applies these defaults ([quality levels](BOTTLES.md#one-command-sessions)):
-
-| Link | Default | Streamer settings |
-|---|---|---|
-| USB | `--quality high --codec hevc` | `--wired --profile m3pro --resolution quality --mbps 60 --codec hevc`: 1344×1408 per eye, 72 fps, 60 Mbps, low latency |
-| Wi-Fi | `--quality normal --codec h264` | `--wireless --mbps 20 --codec h264`: 1344×1408 per eye, 72 fps, 20 Mbps (`BASALT_WIFI_MBPS` overrides) |
+| Link | Streamer settings |
+|---|---|
+| USB | `--wired --profile m3pro --resolution quality --mbps 60 --codec hevc`: 1344×1408 per eye, 72 fps, 60 Mbps, low latency |
+| Wi-Fi | `--wireless --mbps 20 --codec h264`: 1344×1408 per eye, 72 fps, 20 Mbps; raise `--mbps` on a good 5 GHz network |
 
 Why:
 
@@ -20,12 +18,12 @@ Why:
   visible difference in sharpness or smoothness.
 - H.264 over Wi-Fi by default: at low bitrates VideoToolbox's low-latency HEVC rate control drops
   more frames than H.264 (see [the benchmark](#encoder-benchmark)). A verified Wi-Fi 6 session ran
-  HEVC at `--quality high` with `BASALT_WIFI_MBPS=50`; see [compatibility](COMPATIBILITY.md).
+  HEVC at 1344×1408 per eye and 50 Mbps; see [compatibility](COMPATIBILITY.md).
 - At least 30 Mbps for games: with low-latency rate control, VideoToolbox drops whole frames
   (`kVTEncodeInfo_FrameDropped`) instead of lowering quality further when a frame does not fit the
   bitrate. Raising `MaxAllowedFrameQP` or removing `DataRateLimits` does not change this.
-- Encoded size, not bitrate, limits the M3 Pro encoder. 1680×1760 per eye (`--quality max`) does
-  not hold 72 fps with HEVC and is at the limit with H.264.
+- Encoded size, not bitrate, limits the M3 Pro encoder. 1680×1760 per eye does not hold 72 fps
+  with HEVC and is at the limit with H.264.
 
 `--profile m3pro` (streamer) selects `balanced` (1152×1216 per eye), 72 fps, 30 Mbps, and low
 latency; explicit `--fps`, `--mbps`, `--resolution`, and `--latency` win. It does not select a
@@ -125,7 +123,8 @@ behavior for comparison. Hand skeletons are not predicted; see [hand tracking](H
 | Periodic IDR | `--idr-interval` | 2 s | 1–60 s. Not needed for loss recovery; over USB it only costs a bitrate pulse (an IDR was about 2.4 times an average frame at 30 Mbps). |
 | Decoder buffering | `--latency` | `low` | `balanced`, `low`, `ultra`; see [the streamer guide](STREAMER.md#latency-presets) |
 | Controller prediction | `--controller-prediction` | `full` | `alvr` for comparison |
-| Hand tracking | `--hand-tracking` | `on` | |
+| Hand tracking | opt-in | off | Quest optical hand tracking and `XR_EXT_hand_tracking`; see [hand tracking](HAND-TRACKING.md) |
+| Touch grip offset | opt-in | kept | The ALVR client's SteamVR grip offset; removing it exposes Meta's grip pose |
 | Runtime frame window | — | 2 unconsumed frames | `xrWaitFrame` blocks on it |
 | Pose freshness | — | 500 ms | Older head or controller samples are reported untracked |
 
@@ -158,11 +157,10 @@ the Quest.
 
 Other sources:
 
-- `scripts/play.zsh` saves the Quest's `adb logcat` for the whole session
-  (`~/Library/Logs/BasaltVR/quest-<time>.log`; the Quest itself keeps only about 30 s). MediaCodec
-  errors there mean the Quest could not decode the stream.
-- `BASALT_RUNTIME_LOG` and `BASALT_HAPTIC_LOG=1`: see
-  [runtime diagnostics](../runtime/README.md#runtime-diagnostics).
+- The Quest's log: run `adb logcat > quest.log` for the whole session (the Quest itself keeps only
+  about 30 s). MediaCodec errors there mean the Quest could not decode the stream.
+- `BASALT_RUNTIME_LOG` (also the `head pose pinning:` line), `BASALT_HAPTIC_LOG=1`, and
+  `BASALT_COMPOSITOR_LOG=1`: see [runtime diagnostics](../runtime/README.md#runtime-diagnostics).
 - A/B runs with `hello_xr`: `runtime/scripts/test-khr-hello-xr-headset.zsh` with
   `BASALT_HEADSET_MBPS`, `BASALT_HEADSET_FPS`, `BASALT_HEADSET_RESOLUTION`, and extra streamer flags
   in `BASALT_HEADSET_STREAMER_ARGS` (for example `'--codec hevc'` or `'--entropy cavlc'`).

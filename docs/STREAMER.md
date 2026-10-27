@@ -44,10 +44,9 @@ control port 9943 and stream port 9944, negotiates ALVR's wired mode, and carrie
 headset uplink over TCP. Ctrl-C removes the port forwards. It does not need `--discover`, Wi-Fi,
 or `--bind`; `--wired` and `--discover` are intentionally mutually exclusive.
 
-`scripts/install-quest-client.zsh` installs the official ALVR v20.14.1 Android client
-(`alvr_client_android.apk` from the ALVR GitHub release; set `ALVR_APK` to its path). It checks the
-APK's pinned SHA-256 on a private copy, installs that copy, and asks before it removes a different
-ALVR version from the Quest.
+Install the official ALVR v20.14.1 Android client (`alvr_client_android.apk` from the ALVR GitHub
+release) with `adb install alvr_client_android.apk`. Remove a different ALVR version from the Quest
+first.
 
 ## Quest over Wi-Fi
 
@@ -67,20 +66,13 @@ ask to allow incoming connections for `basalt-streamer`, or Local Network access
 terminal app: click Allow. The Mac and the Quest must be on the same subnet; guest or
 client-isolated Wi-Fi blocks the broadcast.
 
-`scripts/play.zsh` picks the link for you: USB when a USB Quest is attached, otherwise Wi-Fi.
-Force one with `--usb` or `--wifi`; its quality levels and codec defaults are listed in
-[the bottle guide](BOTTLES.md#one-command-sessions). Wi-Fi streaming itself does not need adb.
-To let the scripts check and open ALVR without a cable, run `scripts/quest-wireless.zsh` once
-with the Quest plugged in: it runs `adb tcpip 5555`, connects to the Quest's Wi-Fi address, and
-saves that address in `~/Library/Application Support/BasaltVR/quest-ip`. Later, without the
-cable, the same command reconnects (`--ip <quest-ip>` sets a new address; `status` shows what adb
-sees). The Quest forgets adb over Wi-Fi when it restarts; plug it in and run the script again.
+Choose the link with `--wired` (USB) or `--wireless` (Wi-Fi); recommended settings for each are
+in [performance](PERFORMANCE.md#recommended-settings). Wi-Fi streaming does not need adb.
 
-If the same Quest is listed twice by `adb devices` (USB serial and `<quest-ip>:5555`), the scripts
-pick one serial and pass `-s` on every adb command: a USB device wins, then the saved Quest IP,
-then the lowest serial. Only Quest models are chosen; emulators and other Android devices are
-ignored and never get a command. `--wired` only ever uses a USB serial and says so if adb only
-sees the Quest over Wi-Fi.
+If the same Quest is listed twice by `adb devices` (USB serial and `<quest-ip>:5555` when adb over
+Wi-Fi is on), `--wired` passes `-s` with the USB serial on every adb command; with several USB
+devices the lowest serial wins. `--wired` only ever uses a USB serial and says so if adb only sees
+the Quest over Wi-Fi.
 
 Wi-Fi uses UDP video with a bounded send queue. Congestion drops stale frames, recovers with an IDR
 (see "Loss recovery" below), and an adaptive controller lowers the encoder bitrate (by 20% steps,
@@ -161,8 +153,8 @@ IDR access units start with VPS, SPS, and PPS, and a `DecoderConfig` control pac
 (`video/hevc`) as `csd-0`. The stream configuration also names the codec
 (`video.preferred_codec`). Keyframes are IDR pictures (NAL type 20), so the loss-recovery gate
 below works unchanged. The streamer's default stays H.264 and `--profile m3pro` does not select
-a codec. `scripts/play.zsh` uses HEVC by default over USB, where a headset A/B in The Lab measured
-lower latency and Quest decode time than H.264 at the same settings, and H.264 over Wi-Fi; see
+a codec. HEVC is recommended over USB, where a headset A/B in The Lab measured lower latency and
+Quest decode time than H.264 at the same settings, and H.264 over Wi-Fi; see
 [performance](PERFORMANCE.md#hevc). Do not use HEVC at 1680×1760 per eye: on an M3 Pro it takes
 about 23 ms per frame, more than a 72 Hz frame.
 
@@ -179,12 +171,13 @@ the head (`--controller-prediction full`). ALVR's own default predicts controlle
 less and relies on SteamVR to extrapolate the rest; Basalt has no such step, so
 `--controller-prediction alvr` exists only for comparison.
 
-Touch poses: the ALVR client adds its own SteamVR-oriented grip offset (5 mm, -15° pitch); the
-streamer removes it, so the runtime exposes Meta's grip pose. `--hand-tracking on` (default)
-uses Quest optical hand tracking for a hand without a controller: the game gets an emulated
-Touch controller (pinch = trigger, fist = grip, ALVR's gesture set) and the hand skeleton through
-`XR_EXT_hand_tracking`. Switching between hands and controllers works mid-session.
-`--hand-tracking off` ignores tracked hands. Details: [hand tracking](HAND-TRACKING.md).
+Touch poses: the ALVR client adds its own SteamVR-oriented grip offset (5 mm, -15° pitch). The
+streamer keeps it by default; removing it, so the runtime exposes Meta's grip pose, is opt-in.
+Quest optical hand tracking is off by default (opt-in). When it is on, a hand without a controller
+drives an emulated Touch controller (pinch = trigger, fist = grip, ALVR's gesture set) and the game
+gets the hand skeleton through `XR_EXT_hand_tracking`; switching between hands and controllers
+works mid-session. When it is off, tracked hands are ignored. Details:
+[hand tracking](HAND-TRACKING.md).
 
 ### Latency presets
 
@@ -384,5 +377,3 @@ the runtime control protocol, and a live loopback round-trip through the local p
 It also covers HEVC parameter sets and packets, loss recovery on live VideoToolbox H.264 and HEVC
 output (`frame_num` and reference picture sets), the reconnect supervisor, runtime connection
 replacement, the idle filler, hand-tracking decode and gestures, and the `pipeline` statistics.
-`scripts/check.zsh` also runs `scripts/test-quest-adb.zsh`, which checks the Quest serial choice
-and the `play.zsh` Quest-log cleanup with a fake `adb`.

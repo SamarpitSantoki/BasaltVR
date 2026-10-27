@@ -17,32 +17,35 @@ runtime/scripts/build-opencomposite.zsh        # -> runtime/build/opencomposite/
 
 The script also needs `git` and `python3`. It:
 
-1. Clones <https://github.com/Charmillionaire/OpenComposite> into the ignored
+1. Clones upstream OpenComposite, <https://gitlab.com/znixian/OpenOVR>, into the ignored
    `runtime/build/opencomposite/src` and checks out the pinned commit
-   `339509b9caf534fa2ced71dc71331ec3c9c3a1a6`, with the `libs/openxr-sdk` and `libs/glm`
-   submodules at the commits that commit pins.
-2. Applies every patch in `runtime/openvr-proxy/opencomposite-patches` in order, and fails if one
-   does not apply. A later run reuses the checkout when the commit and the patch set are unchanged,
-   and refuses to touch a checkout with local changes.
+   `cff07db75c4823afe93ed7027b03d5f7bc86f164` (branch `openxr`), with the `libs/openxr-sdk` and
+   `libs/glm` submodules at the commits that commit pins.
+2. Applies the patches in `runtime/openvr-proxy/opencomposite-patches`: first the six in its
+   `fork/` folder, then Basalt's own, each set in file-name order. It fails if one does not apply.
+   A later run reuses the checkout when the commit and the patch set are unchanged, and refuses to
+   touch a checkout with local changes.
 3. Cross-builds a 64-bit, D3D11-only DLL with the repository's MinGW toolchain file, linking the
    MinGW runtime statically (a game prefix has no MinGW DLLs). The DLL reports the version
-   `basalt-339509b9caf5`.
+   `basalt-cff07db75c48`.
 4. Fails unless the result is a PE32+ x86-64 DLL, its export table matches
    `runtime/openvr-proxy/opencomposite-exports.txt` exactly, the generated stubs use the MSVC
    struct-return ABI (patch 0004), and it imports no MinGW runtime DLL. It prints the imports,
    exports, and SHA-256.
 
-The source is the Charmillionaire fork of the upstream `openxr` branch (upstream commit
-`cff07db`). Upstream registers at most `IVRSystem_022`, `IVRCompositor_028`, `IVRInput_010`,
-`IVROverlay_027`, and `IVRApplications_007`, and aborts on any other version. The fork adds the
-OpenVR 2.15.6 interfaces `IVRSystem_026`, `IVRCompositor_029`, `IVRInput_011`, `IVROverlay_028`,
-and `IVRApplications_008`, and answers the `IVRIPCResourceManagerClient` probe instead of
-aborting. Current Half-Life: Alyx builds request these.
+Upstream `cff07db` registers at most `IVRSystem_022`, `IVRCompositor_028`, `IVRInput_010`,
+`IVROverlay_027`, and `IVRApplications_007`, and aborts on any other version. The six `fork/`
+patches are the commits of a former GitHub fork of the `openxr` branch, kept as patches with their
+original authors so the build does not depend on that repository. They add the OpenVR 2.15.6
+interfaces `IVRSystem_026`, `IVRCompositor_029`, `IVRInput_011`, `IVROverlay_028`, and
+`IVRApplications_008`, and answer the `IVRIPCResourceManagerClient` probe instead of aborting.
+Current Half-Life: Alyx builds request these.
 
 ## Basalt patches
 
-The patches are in
-[`runtime/openvr-proxy/opencomposite-patches`](../runtime/openvr-proxy/opencomposite-patches).
+Basalt's own patches are in
+[`runtime/openvr-proxy/opencomposite-patches`](../runtime/openvr-proxy/opencomposite-patches)
+and apply after the `fork/` patches.
 
 | Patch | Fixes |
 |---|---|
@@ -135,8 +138,9 @@ done
 ```
 
 (`basaltctl` here is `swift run --package-path streamer basaltctl` or the release binary in
-`streamer/.build/release`.) `scripts/play.zsh the-lab` starts Steam first, runs `TheLab.exe`, and
-keeps the session open while Robot Repair runs after the hub exits. Robot Repair inherits the
+`streamer/.build/release`.) To play, start Steam with `basaltctl steam start steam`, start the
+streamer with `--runtime` as in [the bottle guide](BOTTLES.md#launch), and run
+`basaltctl run the-lab --control-file PATH`. Robot Repair, which the hub starts, inherits the
 Basalt environment from `TheLab.exe` and opens its own runtime connection.
 
 ### Example: Half-Life: Alyx
@@ -157,8 +161,7 @@ basaltctl opencomposite install alyx-steam \
 ## Pre-flight without a headset
 
 Run the game against a streamer with no headset to catch OpenComposite aborts before a headset
-session. `scripts/play.zsh --no-adb-check PROFILE` does this: it runs the streamer without
-`--wired`/`--wireless` and without audio. By hand:
+session: run the streamer without `--wired`/`--wireless` and without audio, then the profile:
 
 ```sh
 basalt-streamer --runtime /tmp/basalt-control-test
@@ -209,7 +212,9 @@ game ends.
 
 Basalt's runtime covers each of these: STAGE space, BGRA-only advertisement with a compositor for
 every other format and for quads and flipped rects, up to 16 swapchains, action-set re-attach,
-haptic normalization, and `isActive = XR_FALSE` for untracked hands. See
+haptic normalization, and `isActive = XR_FALSE` for untracked hands. A projection layer in exported
+BGRA swapchains (one mip, at most twice the per-view size) with positive image rects skips the
+compositor even when the rects are offset: the streamer crops each eye by its `imageRect`. See
 [the runtime README](../runtime/README.md).
 
 ## License

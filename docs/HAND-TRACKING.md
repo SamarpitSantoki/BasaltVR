@@ -1,10 +1,11 @@
 # Quest hand tracking and Touch grip poses
 
-With `--hand-tracking on` (the default), a Quest hand that is not holding a controller drives an
-emulated Touch controller through gestures, and games get the hand skeleton through
-`XR_EXT_hand_tracking`. OpenComposite uses that extension for OpenVR skeletal input. Switching
-between hands and controllers works mid-session. `--hand-tracking off` ignores tracked hands: a
-hand without a controller is then untracked.
+Hand tracking is off by default; `basalt-streamer --hand-tracking on` turns it on. Then a Quest hand
+that is not holding a controller drives an emulated Touch controller through gestures, and games get
+the hand skeleton through `XR_EXT_hand_tracking`. OpenComposite uses that extension for OpenVR
+skeletal input. Switching between hands and controllers works mid-session. When it is off, tracked
+hands are ignored: a hand without a controller is untracked, and the runtime does not offer
+`XR_EXT_hand_tracking`.
 
 Verified on a Quest 3 in The Lab: hand tracking, gestures, and switching between hands and
 controllers (see [compatibility](COMPATIBILITY.md)).
@@ -15,8 +16,9 @@ The ALVR v20.14.1 client does not send Meta's grip pose. For Quest 2, 3, 3S, and
 grip multiplied by an offset meant for ALVR's own SteamVR driver: a 5 mm shift and a -15° pitch
 about X (mirrored in x for the right hand). Passed through as the OpenXR grip, this offset was
 stacked with OpenComposite's own Touch-to-SteamVR transform, so OpenVR games saw a tilted, shifted
-hand. The streamer removes the ALVR offset, including the matching correction of linear velocity,
-so the runtime exposes Meta's grip pose.
+hand. The streamer keeps the ALVR offset by default (`--grip-pose alvr`). `--grip-pose meta`
+removes it, including the matching correction of linear velocity, so the runtime exposes Meta's
+grip pose.
 
 The aim pose still equals the grip pose because ALVR sends one pose per hand. OpenComposite
 derives all OpenVR poses from grip, so this matters only for native OpenXR games that use aim.
@@ -29,8 +31,9 @@ Quest (ALVR client 20.14.1)
   stage space, not predicted); about 1.7 KB with both hands, so 2 shards over Wi-Fi
         |
 basalt-streamer: reassembles shards, decodes the packet, and decides per hand and per packet:
-  controller:  grip = ALVR pose without the ALVR offset, client buttons and profile
-  hand:        grip from the palm joint, gesture buttons, Touch profile, HAND_SKELETON
+  controller:  grip = ALVR pose (ALVR offset removed only if opted in), client buttons, profile
+  hand:        (hand tracking on) grip from the palm joint, gesture buttons, Touch profile,
+               HAND_SKELETON
         |
 control protocol v11: CONTROLLER_MOTION, BUTTON_STATE, INTERACTION_PROFILE, CONTROLLER_MASK,
                       HAND_SKELETON (26 joints of pose + radius, joint-valid mask)
