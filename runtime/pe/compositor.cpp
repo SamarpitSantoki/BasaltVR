@@ -144,9 +144,10 @@ struct CompositorState {
     bool registered = false;
     uint32_t nextSlot = 0;
     std::array<uint64_t, kOutputFrames> slotFrames{};
-    // Diagnostics, logged every kDiagnosticIntervalMs: frame and failure
-    // counts, the layer shapes, and one centre texel of the first eye's
-    // source and output, read back one interval later so it never stalls.
+    // Diagnostics, logged every kDiagnosticIntervalMs only with
+    // BASALT_COMPOSITOR_LOG set: frame and failure counts, the layer shapes,
+    // and one centre texel of the first eye's source and output, read back
+    // one interval later so it never stalls.
     ULONGLONG nextDiagnosticTick = 0;
     uint64_t composited = 0;
     uint64_t sourceFailures = 0;
@@ -159,6 +160,27 @@ struct CompositorState {
 SRWLOCK gCompositorLock = SRWLOCK_INIT;
 CompositorState gState{};
 uint64_t gNextOutputGeneration = 1;
+
+// BASALT_COMPOSITOR_LOG=1 turns on the periodic compositor diagnostics (two
+// runtime log lines every 2 s and a 1x1 staging-texture readback). Unset,
+// no staging texture is created and nothing is read back. The cache is a
+// plain interlocked value, like BASALT_HAPTIC_LOG's in input.cpp: a
+// function-local static would make MinGW's libstdc++ emit a thread-safe
+// init guard that imports libwinpthread-1.dll, which the loader cannot find
+// next to the runtime. Racing first calls compute the same answer.
+LONG volatile gCompositorLogState = 0;  // 0 unknown, 1 off, 2 on
+
+bool compositorLogEnabled() {
+    LONG state = InterlockedCompareExchange(&gCompositorLogState, 0, 0);
+    if (state == 0) {
+        char value[16]{};
+        const DWORD length =
+            GetEnvironmentVariableA("BASALT_COMPOSITOR_LOG", value, sizeof(value));
+        state = length > 0 && !(length == 1 && value[0] == '0') ? 2 : 1;
+        InterlockedExchange(&gCompositorLogState, state);
+    }
+    return state == 2;
+}
 
 template <typename Interface>
 void release(Interface*& object) {
@@ -928,8 +950,9 @@ bool compositorSubmitFrame(
             }
         }
 
-        const ULONGLONG now = GetTickCount64();
-        if (now >= gState.nextDiagnosticTick) {
+        const bool diagnose = compositorLogEnabled();
+        const ULONGLONG now = diagnose ? GetTickCount64() : 0;
+        if (diagnose && now >= gState.nextDiagnosticTick) {
             gState.nextDiagnosticTick = now + kDiagnosticIntervalMs;
             // The previous interval's probes have long finished.
             if (gState.probeFrame != 0) {

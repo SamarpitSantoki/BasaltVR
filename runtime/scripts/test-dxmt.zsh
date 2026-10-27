@@ -393,11 +393,12 @@ if [[ -f ${fork_install}/x86_64-windows/d3d11.dll && -f ${fork_install}/x86_64-u
     rm -f "${runtime_log}"
     run_control_gate "runtime compositor" \
         --smoke ./d3d11_compositor_smoke.exe \
-        BASALT_RUNTIME_LOG="${runtime_log}" -- \
+        BASALT_RUNTIME_LOG="${runtime_log}" BASALT_COMPOSITOR_LOG=1 -- \
         "${probe_dir}/basalt_control_test_daemon" \
         --expect-frames 12 --compositor-scenarios \
         --view-width 512 --view-height 512
-    # BASALT_RUNTIME_LOG (a host path) receives the compositor diagnostics.
+    # BASALT_RUNTIME_LOG (a host path) receives the compositor diagnostics;
+    # the periodic layer lines need BASALT_COMPOSITOR_LOG=1.
     if ! grep -q 'compositor active' "${runtime_log}" ||
         ! grep -q 'compositor frame 1: 1 layer(s), left eye draws projection\[fmt 29 view 29 96x80' \
             "${runtime_log}"; then
