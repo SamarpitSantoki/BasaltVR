@@ -84,6 +84,16 @@ All notable changes to BasaltVR are documented here.
   both eyes (UE4) is accepted, and `DXGI_FORMAT_B8G8R8A8_TYPELESS` is accepted as BGRA.
 - Runtime stereo composition honours each eye's `imageRect`; side-by-side submissions no longer
   show the whole image squeezed into each eye.
+- `xrGetReferenceSpaceBoundsRect` reports unavailable bounds for STAGE and LOCAL_FLOOR instead
+  of rejecting them, which made OpenComposite abort at startup.
+- Controller velocity is reported against LOCAL_FLOOR and STAGE, not only LOCAL.
+- `xrEndFrame` accepts (validated) quad layers instead of failing the whole frame; quads are not
+  yet composed, and the frame's projection layer is still streamed.
+- After the headset reconnects with a restarted clock, head tracking resumes instead of
+  dropping every pose whose timestamp is lower than the previous session's.
+- Recentering also queues reference-space-change events for existing STAGE and LOCAL_FLOOR
+  spaces; a full event queue never drops session-state changes and reports
+  `XrEventDataEventsLost`; swapchain wait/release follow acquire order.
 
 ### Project maintenance
 
