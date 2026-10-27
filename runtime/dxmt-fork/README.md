@@ -78,9 +78,12 @@ same tree DXMT's own CI used to produce the official v0.80 release binaries, whi
 `runtime/README.md`: `brew install meson ninja` and an Xcode with the Metal toolchain.
 
 Output: `runtime/build/dxmt/fork-install/{x86_64-windows/*.dll,x86_64-unix/winemetal.so}`,
-tagged `v0.80-basalt.1` in the source checkout. The PE DLLs and winemetal.so are a matched
+tagged `v0.80-basalt.2` in the source checkout. The PE DLLs and winemetal.so are a matched
 set — never mix them with stock v0.80 binaries. After a rebuild, install the new set into an
-existing bottle with `basaltctl bottle install-dxmt NAME` (or `bottle prepare NAME`).
+existing bottle with `basaltctl bottle install-dxmt NAME` (or `bottle prepare NAME`). Nothing
+checks the version of the DLLs already in a bottle: one installed from `v0.80-basalt.1`
+(patches 0001–0004) lacks the 8x MSAA fallback, and 8x MSAA games stay black until you
+reinstall.
 
 ## Verifying
 

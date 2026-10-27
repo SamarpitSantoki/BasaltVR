@@ -337,7 +337,7 @@ account, and a managed Beat Saber launch completes the live Quest acceptance pat
   frame-completion signal, and control-socket protocol. The Phase-1 fence mechanism
   (`ID3D11Fence` signal → `SetEventOnCompletion` wait) and shared-fence creation are now
   probe-verified under the pinned stack by `dxmt_fence_probe` in `test-dxmt.zsh`. As of
-  2026-07-18 the fork itself is implemented: `v0.80-basalt.1` (MIT v0.80 base;
+  2026-07-18 the fork itself is implemented: `v0.80-basalt.2` (MIT v0.80 base;
   `runtime/dxmt-fork` + `runtime/scripts/build-dxmt-fork.zsh`) makes gated NT-handle
   shared textures IOSurface-backed and republishes per-image IOSurfaceIDs, validated
   end-to-end on loader-created OpenXR swapchain images by `test-dxmt.zsh`'s fork phase.

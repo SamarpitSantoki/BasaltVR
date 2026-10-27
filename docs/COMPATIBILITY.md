@@ -17,7 +17,7 @@ project's original target; see the [README](../README.md) and [architecture](ARC
 |---|---|
 | Mac | MacBook Pro, Apple M3 Pro, 18 GB, macOS 26.6.2 (Xcode 27.0 for the build) |
 | Headset | Meta Quest 3, ALVR v20.14.1 client |
-| Engine | Pinned Wine 11.10 with Basalt DXMT `v0.80-basalt.1` (DXMT v0.80 + patches 0001–0006) |
+| Engine | Pinned Wine 11.10 with Basalt DXMT `v0.80-basalt.2` (DXMT v0.80 + patches 0001–0006) |
 | OpenVR | OpenComposite built with `runtime/scripts/build-opencomposite.zsh` (patches 0001–0005), `default` preset, no proxy |
 | Audio | BlackHole 2ch at 48 kHz |
 

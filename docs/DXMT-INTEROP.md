@@ -1,7 +1,7 @@
 # DXMT texture export and IOSurface handoff protocol
 
 Status: **zero-copy path proven end to end, 2026-07-18** — sections 1 and 2
-(IOSurface-backed textures and the IOSurfaceID republish) are built as `v0.80-basalt.1`
+(IOSurface-backed textures and the IOSurfaceID republish) are built as `v0.80-basalt.2`
 (`runtime/dxmt-fork`, `runtime/scripts/build-dxmt-fork.zsh`) and validated by the fork
 phase of `test-dxmt.zsh`: OpenXR swapchain textures under the gate republish nonzero,
 per-image-distinct IOSurfaceIDs, NT-handle reopen still works via the IOSurface's own
@@ -217,7 +217,7 @@ a stock `.so` fails at call time): `d3d11.dll`, `dxgi.dll`, `d3d10core.dll`,
 directly against that Wine's `winemac.so`/`ntdll.so`, so the fork **must be built against
 the pinned Gcenx Wine 11.10** that `test-dxmt.zsh` installs. Tag the fork distinctly
 (`vcs_tag` via `version.h.in`, surfaced in the device description, `dxmt_info.cpp:38`) —
-e.g. `v0.80-basalt.1` — so the runtime can detect and pin it.
+e.g. `v0.80-basalt.2` — so the runtime can detect and pin it.
 
 ## Acceptance tests
 
@@ -244,7 +244,8 @@ e.g. `v0.80-basalt.1` — so the runtime can detect and pin it.
 
 1. ~~**Fork base**: v0.80 tag (MIT, matches pinned validation — recommended) vs `73d42c55`
    (LGPL 2.1+, newer fixes).~~ Resolved 2026-07-18: forked from the v0.80 tag as
-   `v0.80-basalt.1`; patches and pinned build script live in `runtime/dxmt-fork`.
+   `v0.80-basalt.1`; patches and pinned build script live in `runtime/dxmt-fork`. The tag is
+   now `v0.80-basalt.2` (adds patches 0005–0006).
 2. **Phase 2 shared-event export** (Metal SPI exposure) — only after Phase 1 latency is
    measured and found wanting.
 3. ~~`GetPrivateData` GUID vs a Basalt COM extension interface.~~ Resolved 2026-07-18:

@@ -255,7 +255,7 @@ checks the OpenVR proxy; see [OpenComposite](../docs/OPENCOMPOSITE.md).
 
 The next app-facing and graphics slices are:
 
-1. ~~Implement the DXMT texture-export fork~~ Done: `v0.80-basalt.1` builds reproducibly,
+1. ~~Implement the DXMT texture-export fork~~ Done: `v0.80-basalt.2` builds reproducibly,
    the fork phase of `test-dxmt.zsh` gates it, and the cross-process zero-copy pixel proof
    passes (native `IOSurfaceLookup` readback of D3D11-rendered, fence-confirmed pixels).
 2. ~~Control socket + FrameReady + streamer consumption~~ Done end to end. `pe/control.cpp`
