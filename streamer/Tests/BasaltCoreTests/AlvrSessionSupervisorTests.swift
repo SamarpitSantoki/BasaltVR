@@ -42,10 +42,12 @@ private final class FakeSession: AlvrLiveSession, @unchecked Sendable {
         end("closed by Basalt")
     }
 
-    var closed: Bool {
+    var closed: Bool { closes > 0 }
+
+    var closes: Int {
         lock.lock()
         defer { lock.unlock() }
-        return closeCount > 0
+        return closeCount
     }
 }
 
@@ -130,13 +132,12 @@ final class AlvrSessionSupervisorTests: XCTestCase {
         }
         supervisor.onSessionEnded = { session, reason in
             // The session is detached before it is closed.
-            XCTAssertFalse((session as! FakeSession).closed)
-            events.append("ended \((session as! FakeSession).name): \(reason)")
+            let session = session as! FakeSession
+            events.append("ended \(session.name)\(session.closed ? " (closed)" : ""): \(reason)")
         }
         supervisor.onConnectFailed = { error, attempt in
             events.append("failed \(attempt): \(error.localizedDescription)")
         }
-        defer { supervisor.stop() }
 
         try await supervisor.startAndWaitForFirstSession()
         XCTAssertEqual(supervisor.state, .streaming(generation: 1))
@@ -146,12 +147,18 @@ final class AlvrSessionSupervisorTests: XCTestCase {
         XCTAssertTrue(first.closed)
         XCTAssertFalse(second.closed)
 
+        // Stopping takes the same path: detach, then close.
+        await supervisor.stopAndWait()
+        XCTAssertEqual(first.closes, 1)
+        XCTAssertEqual(second.closes, 1)
+
         let log = events.all
         XCTAssertEqual(log.filter { !$0.hasPrefix("state") }, [
             "started first 1",
             "ended first: the headset closed the USB stream",
             "failed 1: Quest asleep",
             "started second 2",
+            "ended second: closed by Basalt",
         ])
         XCTAssertEqual(log.filter { $0.hasPrefix("state") }, [
             "state connecting(attempt: 1)",
@@ -161,6 +168,7 @@ final class AlvrSessionSupervisorTests: XCTestCase {
             "state waitingToReconnect",
             "state connecting(attempt: 2)",
             "state streaming(generation: 2)",
+            "state stopped",
         ])
     }
 
@@ -238,13 +246,119 @@ final class AlvrSessionSupervisorTests: XCTestCase {
             retryDelayNanoseconds: 1_000_000, reconnectDelayNanoseconds: 1_000_000
         ) { _ in try script.next() }
         let ended = Recorder()
-        supervisor.onSessionEnded = { _, reason in ended.append(reason) }
+        supervisor.onSessionEnded = { session, reason in
+            let session = session as! FakeSession
+            ended.append("\(session.name) \(session.closed ? "closed" : "open"): \(reason)")
+        }
         try await supervisor.startAndWaitForFirstSession()
-        supervisor.stop()
+        // stop() only wakes the loop; it may come from any thread.
+        DispatchQueue.global().async { supervisor.stop() }
         XCTAssertTrue(waitUntil { supervisor.state == .stopped })
-        XCTAssertTrue(first.closed)
-        XCTAssertEqual(ended.all, ["closed by Basalt"])
+        await supervisor.stopAndWait()
+        // onSessionEnded ran once, before the session was closed once.
+        XCTAssertEqual(ended.all, ["first open: closed by Basalt"])
+        XCTAssertEqual(first.closes, 1)
         XCTAssertEqual(script.callCount, 1)
+
+        supervisor.stop()
+        await supervisor.stopAndWait()
+        XCTAssertEqual(ended.all.count, 1)
+        XCTAssertEqual(first.closes, 1)
+        XCTAssertEqual(script.callCount, 1)
+    }
+
+    func testStopDuringAConnectEndsPromptlyAndTearsDownALateSession() async throws {
+        let late = FakeSession("late")
+        let release = DispatchSemaphore(value: 0)
+        let cancelled = Recorder()
+        // A handshake blocked in a socket call that ignores cancellation.
+        let supervisor = AlvrSessionSupervisor { _ in
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global().async {
+                    release.wait()
+                    continuation.resume()
+                }
+            }
+            if Task.isCancelled { cancelled.append("cancelled") }
+            return late
+        }
+        let events = Recorder()
+        supervisor.onSessionStarted = { session, _ in
+            events.append("started \((session as! FakeSession).name)")
+        }
+        supervisor.onSessionEnded = { session, reason in
+            let session = session as! FakeSession
+            events.append("ended \(session.name) \(session.closed ? "closed" : "open"): \(reason)")
+        }
+        supervisor.start()
+        XCTAssertTrue(waitUntil { supervisor.state == .connecting(attempt: 1) })
+
+        // The handshake stays blocked, so the wait for it ends at its limit.
+        let stopStarted = Date()
+        await supervisor.stopAndWait(abandonedConnectTimeoutNanoseconds: 100_000_000)
+        XCTAssertLessThan(Date().timeIntervalSince(stopStarted), 1)
+        XCTAssertEqual(supervisor.state, .stopped)
+        XCTAssertTrue(events.all.isEmpty)
+
+        // The abandoned connect was cancelled; the session it still returns
+        // never streams and is detached before it is closed.
+        release.signal()
+        XCTAssertTrue(waitUntil { late.closed })
+        XCTAssertEqual(events.all, ["ended late open: closed by Basalt"])
+        XCTAssertEqual(late.closes, 1)
+        XCTAssertEqual(cancelled.all, ["cancelled"])
+    }
+
+    func testStopAndWaitWaitsForAnAbandonedConnectThatReturnsASession() async throws {
+        let late = FakeSession("late")
+        let release = DispatchSemaphore(value: 0)
+        let supervisor = AlvrSessionSupervisor { _ in
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global().async {
+                    release.wait()
+                    continuation.resume()
+                }
+            }
+            return late
+        }
+        let ended = Recorder()
+        supervisor.onSessionEnded = { session, reason in
+            let session = session as! FakeSession
+            ended.append("\(session.name) \(session.closed ? "closed" : "open"): \(reason)")
+        }
+        supervisor.start()
+        XCTAssertTrue(waitUntil { supervisor.state == .connecting(attempt: 1) })
+
+        // The handshake finishes while stopAndWait() waits: the session it
+        // returns is detached and closed before stopAndWait() returns, so the
+        // streamer's teardown never races a late install.
+        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(100)) {
+            release.signal()
+        }
+        await supervisor.stopAndWait()
+        XCTAssertEqual(ended.all, ["late open: closed by Basalt"])
+        XCTAssertTrue(late.closed)
+        XCTAssertEqual(late.closes, 1)
+    }
+
+    func testStopDuringTheRetryDelayEndsPromptly() async throws {
+        let script = ConnectScript([])
+        let supervisor = AlvrSessionSupervisor(
+            retryDelayNanoseconds: 30_000_000_000
+        ) { _ in try script.next() }
+        supervisor.start()
+        XCTAssertTrue(waitUntil { supervisor.state == .waitingToReconnect })
+        let stopStarted = Date()
+        await supervisor.stopAndWait()
+        XCTAssertLessThan(Date().timeIntervalSince(stopStarted), 1)
+        XCTAssertEqual(supervisor.state, .stopped)
+        XCTAssertEqual(script.callCount, 1)
+    }
+
+    func testStopAndWaitReturnsAtOnceWhenNeverStarted() async {
+        let supervisor = AlvrSessionSupervisor { _ in throw BasaltError("unused") }
+        await supervisor.stopAndWait()
+        XCTAssertEqual(supervisor.state, .idle)
     }
 
     func testBeaconMailboxDeliversTheNewestAnnouncementAndCloses() async {

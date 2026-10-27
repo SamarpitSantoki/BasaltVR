@@ -554,7 +554,7 @@ struct BasaltStreamerApp {
                 // next session starts from the configured bitrate.
                 encoder.updateAverageBitrate(configuredBitrate)
                 calibrationLogGate.reset()
-                guard reason != "closed by Basalt" else { return }
+                guard reason != AlvrSessionSupervisor.stopReason else { return }
                 print("ALVR headset disconnected (\(reason)). The OpenXR runtime keeps running; "
                     + "waiting for ALVR to reconnect over \(linkName)…")
             }
@@ -597,7 +597,11 @@ struct BasaltStreamerApp {
             print("\nShutting down…")
             discovery?.stop()
             beaconMailbox.close()
-            supervisor?.stop()
+            // Waits until the live ALVR session (and one that a handshake the
+            // stop abandoned still returns, for up to 2 s) is detached from
+            // the video router and closed, before the runtime link and
+            // process go away.
+            await supervisor?.stopAndWait()
             runtimeLink?.stop()
             gameAudio?.stop()
             systemState.restore()

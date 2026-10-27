@@ -208,6 +208,12 @@ public final class AlvrClientSession: AlvrLiveSession, @unchecked Sendable {
 /// asleep, ALVR closed, cable or Wi-Fi lost) reports it, closes it, and goes
 /// back to connecting. The OpenXR runtime and the game never see this; they
 /// keep running while no client is attached.
+///
+/// Every session that `connect` returns is detached through
+/// `onSessionEnded` and then closed, exactly once, by the supervisor.
+/// `stop()` only ends the live session and wakes the loop, so a stop follows
+/// the same order as a disconnect; `stopAndWait()` also waits until the loop
+/// has done that.
 public final class AlvrSessionSupervisor: @unchecked Sendable {
     public enum State: Equatable, Sendable {
         case idle
@@ -219,11 +225,17 @@ public final class AlvrSessionSupervisor: @unchecked Sendable {
 
     public typealias Connect = @Sendable (_ attempt: Int) async throws -> AlvrLiveSession
 
-    /// Called on the supervisor task. Set these before `start`.
+    /// The reason `onSessionEnded` reports for a session ended by `stop()`.
+    public static let stopReason = "closed by Basalt"
+
+    /// Called on the supervisor task (for a session that a connect returned
+    /// after `stop()`, on that connect's task). Set these before `start`.
     public var onStateChange: (@Sendable (State) -> Void)?
     public var onSessionStarted: (@Sendable (_ session: AlvrLiveSession, _ generation: Int) -> Void)?
     /// Runs before the ended session is closed, so callers can detach it
-    /// from media callbacks first.
+    /// from media callbacks first. This includes a session ended by `stop()`
+    /// and a session that `connect` returned after `stop()` (which never
+    /// started streaming), so the caller can undo what `connect` attached.
     public var onSessionEnded: (@Sendable (_ session: AlvrLiveSession, _ reason: String) -> Void)?
     public var onConnectFailed: (@Sendable (_ error: Error, _ attempt: Int) -> Void)?
     /// Runs after a session ended and after every failed attempt, before the
@@ -238,7 +250,15 @@ public final class AlvrSessionSupervisor: @unchecked Sendable {
     private let lock = NSLock()
     private var stopped = false
     private var started = false
-    private var activeSession: AlvrLiveSession?
+    private var finished = false
+    /// Wakes whatever the loop waits on (a connect or the live session) when
+    /// `stop()` is called.
+    private var wakeForStop: (@Sendable () -> Void)?
+    private var finishWaiters: [CheckedContinuation<Void, Never>] = []
+    /// Connect attempts whose task is still running, including ones the loop
+    /// abandoned on `stop()`; `stopAndWait()` waits for them too.
+    private var runningConnects = 0
+    private var connectsDoneWaiters: [@Sendable () -> Void] = []
     private var firstSessionContinuation: CheckedContinuation<Void, Error>?
     private var firstSessionResult: Result<Void, Error>?
     private var currentState = State.idle
@@ -295,13 +315,64 @@ public final class AlvrSessionSupervisor: @unchecked Sendable {
         }
     }
 
-    /// Stops reconnecting and closes the live session, if any.
+    /// Stops reconnecting and ends the live session, if any. Returns at once
+    /// and is safe to call from any thread and more than once. The loop then
+    /// calls `onSessionEnded` with `stopReason` and closes the session; a
+    /// connect or retry delay in progress is abandoned (a connect is
+    /// cancelled, and a session it still returns is detached and closed when
+    /// it arrives). Use `stopAndWait()` to wait for that teardown.
     public func stop() {
         lock.lock()
         stopped = true
-        let session = activeSession
+        let wake = wakeForStop
+        wakeForStop = nil
         lock.unlock()
-        session?.close()
+        wake?()
+    }
+
+    /// `stop()`, then waits until the loop has detached and closed the live
+    /// session and finished. A connect that the stop abandoned may still
+    /// return a session, which is then detached and closed as well; that is
+    /// waited for up to `abandonedConnectTimeoutNanoseconds`, because a
+    /// blocking handshake socket does not observe cancellation. Returns at
+    /// once if the loop never started. Do not call it from a supervisor
+    /// callback: the loop is waiting for that callback to return.
+    public func stopAndWait(abandonedConnectTimeoutNanoseconds: UInt64 = 2_000_000_000) async {
+        stop()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            guard started, !finished else {
+                lock.unlock()
+                continuation.resume()
+                return
+            }
+            finishWaiters.append(continuation)
+            lock.unlock()
+        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let done = OneShot<Void>(continuation)
+            lock.lock()
+            guard runningConnects > 0 else {
+                lock.unlock()
+                done.resume(())
+                return
+            }
+            connectsDoneWaiters.append { _ = done.resume(()) }
+            lock.unlock()
+            Task.detached {
+                try? await Task.sleep(nanoseconds: abandonedConnectTimeoutNanoseconds)
+                done.resume(())
+            }
+        }
+    }
+
+    private func connectFinished() {
+        lock.lock()
+        runningConnects -= 1
+        let waiters = runningConnects == 0 ? connectsDoneWaiters : []
+        if runningConnects == 0 { connectsDoneWaiters.removeAll() }
+        lock.unlock()
+        for waiter in waiters { waiter() }
     }
 
     private var isStopped: Bool {
@@ -310,15 +381,21 @@ public final class AlvrSessionSupervisor: @unchecked Sendable {
         return stopped
     }
 
-    /// Records the live session so `stop()` can close it. Returns false (and
-    /// records nothing) when a stop was already requested.
-    @discardableResult
-    private func adoptActiveSession(_ session: AlvrLiveSession?) -> Bool {
+    /// Installs the closure that `stop()` calls. Returns false (and installs
+    /// nothing) when a stop was already requested; the caller then wakes
+    /// itself.
+    private func installWakeForStop(_ wake: @escaping @Sendable () -> Void) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        if session != nil, stopped { return false }
-        activeSession = session
+        guard !stopped else { return false }
+        wakeForStop = wake
         return true
+    }
+
+    private func clearWakeForStop() {
+        lock.lock()
+        wakeForStop = nil
+        lock.unlock()
     }
 
     private func setState(_ state: State) {
@@ -341,14 +418,33 @@ public final class AlvrSessionSupervisor: @unchecked Sendable {
         continuation?.resume(with: result)
     }
 
+    private func finishLoop() {
+        lock.lock()
+        finished = true
+        let waiters = finishWaiters
+        finishWaiters.removeAll()
+        lock.unlock()
+        for waiter in waiters { waiter.resume() }
+    }
+
+    /// Detaches, then closes a session that the loop is done with.
+    private func tearDown(_ session: AlvrLiveSession, reason: String) {
+        onSessionEnded?(session, reason)
+        session.close()
+    }
+
     private func run() async {
+        defer { finishLoop() }
         var failedAttempts = 0
         var generation = 0
         while !isStopped {
             setState(.connecting(attempt: failedAttempts + 1))
             let session: AlvrLiveSession
             do {
-                session = try await connect(failedAttempts + 1)
+                guard let connected = try await connectUnlessStopped(failedAttempts + 1) else {
+                    break
+                }
+                session = connected
             } catch {
                 failedAttempts += 1
                 if isStopped { break }
@@ -365,23 +461,28 @@ public final class AlvrSessionSupervisor: @unchecked Sendable {
                 await pause(retryDelayNanoseconds)
                 continue
             }
-
-            guard adoptActiveSession(session) else {
-                session.close()
+            if isStopped {
+                tearDown(session, reason: Self.stopReason)
                 break
             }
+
             failedAttempts = 0
             generation += 1
             setState(.streaming(generation: generation))
             onSessionStarted?(session, generation)
             finishStartup(.success(()))
 
+            // The session ending by itself and `stop()` both wake this wait;
+            // either way the session is still open here.
             let reason = await withCheckedContinuation { (continuation: CheckedContinuation<String, Never>) in
-                session.onEnded { continuation.resume(returning: $0) }
+                let ended = OneShot<String>(continuation)
+                if !installWakeForStop({ _ = ended.resume(AlvrSessionSupervisor.stopReason) }) {
+                    ended.resume(Self.stopReason)
+                }
+                session.onEnded { _ = ended.resume($0) }
             }
-            adoptActiveSession(nil)
-            onSessionEnded?(session, reason)
-            session.close()
+            clearWakeForStop()
+            tearDown(session, reason: reason)
             if isStopped { break }
             setState(.waitingToReconnect)
             await beforeReconnect?(0)
@@ -391,6 +492,44 @@ public final class AlvrSessionSupervisor: @unchecked Sendable {
         finishStartup(.failure(BasaltError("ALVR session supervisor stopped")))
     }
 
+    /// Runs `connect`, or returns nil as soon as `stop()` is requested. The
+    /// abandoned connect is cancelled; a session it still returns is torn
+    /// down when it arrives.
+    private func connectUnlessStopped(_ attempt: Int) async throws -> AlvrLiveSession? {
+        lock.lock()
+        guard !stopped else {
+            // Never start a handshake that a stop already abandoned.
+            lock.unlock()
+            return nil
+        }
+        runningConnects += 1
+        lock.unlock()
+        let outcome = await withCheckedContinuation {
+            (continuation: CheckedContinuation<Result<AlvrLiveSession, Error>?, Never>) in
+            let result = OneShot<Result<AlvrLiveSession, Error>?>(continuation)
+            let connect = self.connect
+            let attemptTask = Task.detached(priority: .userInitiated) { [self] in
+                defer { connectFinished() }
+                let attemptResult: Result<AlvrLiveSession, Error>
+                do {
+                    attemptResult = .success(try await connect(attempt))
+                } catch {
+                    attemptResult = .failure(error)
+                }
+                if !result.resume(attemptResult), case .success(let late) = attemptResult {
+                    tearDown(late, reason: AlvrSessionSupervisor.stopReason)
+                }
+            }
+            let wake: @Sendable () -> Void = {
+                attemptTask.cancel()
+                result.resume(nil)
+            }
+            if !installWakeForStop(wake) { wake() }
+        }
+        clearWakeForStop()
+        return try outcome?.get()
+    }
+
     /// Sleeps in short steps so `stop()` is honored promptly.
     private func pause(_ nanoseconds: UInt64) async {
         let deadline = DispatchTime.now().uptimeNanoseconds &+ nanoseconds
@@ -398,6 +537,29 @@ public final class AlvrSessionSupervisor: @unchecked Sendable {
             let remaining = deadline &- DispatchTime.now().uptimeNanoseconds
             try? await Task.sleep(nanoseconds: min(remaining, 50_000_000))
         }
+    }
+}
+
+/// Resumes a continuation with the first value it is given and ignores the
+/// rest, so several wake-up sources can race safely.
+private final class OneShot<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value, Never>?
+
+    init(_ continuation: CheckedContinuation<Value, Never>) {
+        self.continuation = continuation
+    }
+
+    /// Returns true when this call resumed the continuation.
+    @discardableResult
+    func resume(_ value: Value) -> Bool {
+        lock.lock()
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        guard let continuation else { return false }
+        continuation.resume(returning: value)
+        return true
     }
 }
 
