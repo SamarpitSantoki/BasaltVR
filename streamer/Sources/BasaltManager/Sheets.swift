@@ -170,14 +170,33 @@ struct ProfileEditorSheet: View {
         .confirmationDialog(
             "Delete '\(profile.name)'?", isPresented: $confirmingDelete,
             titleVisibility: .visible) {
-                Button("Delete Profile", role: .destructive) {
-                    Task { await model.deleteProfile(profile.name); dismiss() }
+                if hasVRFiles {
+                    Button("Restore and Delete") { delete(restoringVR: true) }
+                    Button("Delete Only", role: .destructive) { delete(restoringVR: false) }
+                } else {
+                    Button("Delete Profile", role: .destructive) { delete(restoringVR: false) }
                 }
+                Button("Cancel", role: .cancel) {}
             } message: {
-                Text(model.vrStatuses[profile.name]?.hasRecord == true
-                     ? "The bottle and installed game will not be removed. Basalt's VR files stay in the game folder: use Prepare VR… → Restore Game Files… first to put the original files back."
+                Text(hasVRFiles
+                     ? "The bottle and installed game will not be removed. Basalt installed VR files in the game folder. Restore and Delete puts the game's own files back first. Delete Only leaves Basalt's files in the game folder. Both remove the profile's VR setup record."
                      : "The bottle and installed game will not be removed.")
             }
+    }
+
+    /// The profile has VR files from Prepare VR that Restore can put back.
+    private var hasVRFiles: Bool {
+        switch model.vrStatuses[profile.name] ?? .notPrepared {
+        case .ready, .changed: return true
+        case .notPrepared, .nativeOpenXR: return false
+        }
+    }
+
+    private func delete(restoringVR: Bool) {
+        Task {
+            await model.deleteProfile(profile.name, restoringVR: restoringVR)
+            dismiss()
+        }
     }
 
     private func save() {

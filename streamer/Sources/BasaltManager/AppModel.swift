@@ -497,15 +497,23 @@ final class BasaltAppModel: ObservableObject {
         isBusy = false
     }
 
-    func deleteProfile(_ name: String) async {
-        do {
-            try manager.deleteProfile(name)
+    /// Deletes the profile and its VR setup record. With `restoringVR`, Basalt first puts the
+    /// game's own VR files back and keeps the profile if that restore is not complete.
+    func deleteProfile(_ name: String, restoringVR: Bool = false) async {
+        let manager = manager
+        isBusy = true
+        let result = await Task.detached {
+            Result { try manager.deleteProfile(name, restoringVR: restoringVR) }
+        }.value
+        switch result {
+        case .success:
             profileSettings[name] = nil
             persistProfileSettings()
-            await refresh()
-        } catch {
+        case .failure(let error):
             alertMessage = error.localizedDescription
         }
+        // Refresh either way: a restore that did not finish can still have changed files.
+        await refresh()
     }
 
     func streamSettings(for profile: String) -> StreamLaunchSettings {

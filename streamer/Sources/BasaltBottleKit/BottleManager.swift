@@ -871,7 +871,12 @@ public final class BottleManager: @unchecked Sendable {
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
-    public func deleteProfile(_ name: String) throws {
+    /// Deletes a launch profile and its VR setup record (`VRSetup/<name>.json`), so a new
+    /// profile with the same name never inherits the record. With `restoringVR`, Restore Game
+    /// Files runs first and the profile is deleted only when Restore is complete; the report
+    /// is returned. Without it, Basalt's VR files stay in the game folder.
+    @discardableResult
+    public func deleteProfile(_ name: String, restoringVR: Bool = false) throws -> VRRestoreReport? {
         let file = try paths.profileFile(name)
         guard paths.contains(file) else {
             throw BottleToolError("Refusing to delete a profile outside the managed root")
@@ -879,7 +884,25 @@ public final class BottleManager: @unchecked Sendable {
         guard fileManager.fileExists(atPath: file.path) else {
             throw BottleToolError("Launch profile '\(name)' does not exist")
         }
+        var report: VRRestoreReport?
+        if restoringVR, try loadVRSetupRecord(name) != nil {
+            let restored = try restoreVR(profileName: name)
+            guard restored.isComplete else {
+                let folders = restored.unrestored.map { $0.deletingLastPathComponent().path }
+                    .joined(separator: ", ")
+                throw BottleToolError(
+                    "Restore is not complete: the original openvr_api.dll is missing in \(folders). Basalt kept its VR setup there and did not delete '\(name)'. Put the original back as openvr_api.dll.basalt-original and try again, or delete the profile without restoring.")
+            }
+            report = restored
+        }
+        // The record goes first: a record left without its profile would pass to the next
+        // profile with this name.
+        let record = try paths.vrSetupFile(name)
+        if pathExists(record.path) {
+            try fileManager.removeItem(at: record)
+        }
         try fileManager.removeItem(at: file)
+        return report
     }
 
     /// File name of the real OpenComposite DLL when the Basalt proxy owns `openvr_api.dll`.

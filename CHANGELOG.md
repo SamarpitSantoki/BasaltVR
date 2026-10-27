@@ -90,6 +90,9 @@ before each session). The streamer reports a mismatched DLL instead of connectin
   and retires the old `openvr_api.dll.basalt-original` (removed only when an identical copy is
   kept, otherwise renamed to `.basalt-stale-original-<time>`). Prepare VR also takes such a newer
   DLL as the original. A later Restore no longer writes the old DLL over the updated game.
+- Deleting a profile with VR files offers **Restore and Delete** or **Delete Only**, and always
+  removes its `VRSetup/<profile>.json` record, so a new profile with the same name no longer
+  inherits the old setup.
 
 ### Changed
 

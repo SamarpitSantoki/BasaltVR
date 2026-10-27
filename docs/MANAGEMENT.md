@@ -117,7 +117,11 @@ shows the session state with a Stop button.
      missing, Restore keeps that folder's complete setup and record for a later retry and
      reports that restoration is incomplete. Unedited arguments return to their exact original order.
 5. **Profiles** can edit their source, Windows executable, working directory, arguments, and
-   environment, or be deleted without removing the game (or Basalt's VR files; restore first).
+   environment, or be deleted without removing the game. When Prepare VR installed files for the
+   profile, **Delete Profile…** offers **Restore and Delete** (puts the game's own files back
+   first, and keeps the profile if that restore is not complete) or **Delete Only** (Basalt's
+   files stay in the game folder). Deleting always removes `VRSetup/<profile>.json`, so a new
+   profile with the same name starts with no VR setup.
    The profile editor keeps the advanced **Install a DLL by Hand…** installer, which writes a
    chosen DLL inside the managed prefix and refuses to replace an `opencomposite.ini` Basalt did
    not write.

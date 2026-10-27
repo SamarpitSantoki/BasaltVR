@@ -598,6 +598,68 @@ final class VRSetupTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: dll), valve)
     }
 
+    // MARK: - Deleting a profile
+
+    func testDeletingAProfileRemovesItsVRRecordSoANewProfileStartsClean() throws {
+        let (location, dll, _) = try alyxFixture()
+        let record = try manager.paths.vrSetupFile("alyx")
+        try manager.prepareVR(profileName: "alyx", location: location, mode: .auto,
+                              artifacts: artifacts, replaceCustomFiles: true)
+        XCTAssertTrue(fm.fileExists(atPath: record.path))
+
+        // Delete only: the record goes, Basalt's files stay in the game folder.
+        XCTAssertNil(try manager.deleteProfile("alyx"))
+        XCTAssertFalse(fm.fileExists(atPath: record.path))
+        XCTAssertEqual(try Data(contentsOf: dll), try Data(contentsOf: artifacts.proxy))
+        XCTAssertTrue(fm.fileExists(atPath: dll.appendingPathExtension("basalt-original").path))
+
+        try saveProfile("alyx", executable: #"C:\Games\Other\other.exe"#)
+        XCTAssertNil(try manager.loadVRSetupRecord("alyx"))
+        XCTAssertEqual(manager.vrSetupStatus(profileName: "alyx"), .notPrepared)
+        // A native OpenXR record goes too, and a profile without a record deletes as before.
+        let exe = try write(Self.pe(marker: 1), "Games/XR/XR.exe")
+        _ = try write(Self.pe(marker: 2), "Games/XR/XR_Data/Plugins/x86_64/openxr_loader.dll")
+        try saveProfile("xr", executable: #"C:\Games\XR\XR.exe"#)
+        try manager.prepareVR(
+            profileName: "xr",
+            location: VRGameLocation(executable: exe, folder: exe.deletingLastPathComponent()),
+            mode: .auto, artifacts: artifacts)
+        try manager.deleteProfile("xr")
+        XCTAssertFalse(fm.fileExists(atPath: try manager.paths.vrSetupFile("xr").path))
+        try manager.deleteProfile("alyx")
+        XCTAssertTrue(try manager.listProfiles().isEmpty)
+    }
+
+    func testDeletingWithRestorePutsTheGameFilesBackFirst() throws {
+        let (location, dll, valve) = try alyxFixture()
+        try manager.prepareVR(profileName: "alyx", location: location, mode: .auto,
+                              artifacts: artifacts, replaceCustomFiles: true)
+        let report = try XCTUnwrap(try manager.deleteProfile("alyx", restoringVR: true))
+        XCTAssertTrue(report.isComplete)
+        XCTAssertEqual(try Data(contentsOf: dll), valve)
+        XCTAssertFalse(fm.fileExists(atPath: dll.appendingPathExtension("basalt-original").path))
+        XCTAssertFalse(fm.fileExists(atPath: try manager.paths.vrSetupFile("alyx").path))
+        XCTAssertThrowsError(try manager.loadProfile("alyx"))
+
+        // Nothing to restore: the profile is deleted and there is no report.
+        try saveProfile("plain", executable: #"C:\Games\Plain\plain.exe"#)
+        XCTAssertNil(try manager.deleteProfile("plain", restoringVR: true))
+        XCTAssertThrowsError(try manager.loadProfile("plain"))
+    }
+
+    func testDeletingWithAnIncompleteRestoreKeepsTheProfileAndRecord() throws {
+        let (location, dll, _) = try alyxFixture()
+        try manager.prepareVR(profileName: "alyx", location: location, mode: .auto,
+                              artifacts: artifacts, replaceCustomFiles: true)
+        try fm.removeItem(at: dll.appendingPathExtension("basalt-original"))
+        XCTAssertThrowsError(try manager.deleteProfile("alyx", restoringVR: true)) {
+            XCTAssertTrue($0.localizedDescription.contains("did not delete"), $0.localizedDescription)
+        }
+        XCTAssertNoThrow(try manager.loadProfile("alyx"))
+        XCTAssertNotNil(try manager.loadVRSetupRecord("alyx"))
+        XCTAssertEqual(try Data(contentsOf: dll), try Data(contentsOf: artifacts.proxy))
+    }
+
     // MARK: - Boundaries and failures
 
     func testPathsOutsideTheBottleAndSymbolicLinksAreRefused() throws {
