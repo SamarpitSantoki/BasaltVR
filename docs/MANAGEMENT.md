@@ -50,8 +50,10 @@ shows the session state with a Stop button.
    and BSManager games. Steam games in a managed bottle can become `-applaunch APP_ID` profiles
    without re-entering paths. **Add Game…** (toolbar, `plus`) adds any other Windows game, such as
    one from GOG or itch.io: pick a Basalt bottle and the game's `.exe` inside its `drive_c` (install
-   it first with Bottles → ⋯ → Run Windows Installer…). The name comes from the game folder and
-   the source (Direct or itch.io) from the path; optional arguments are split on spaces, without
+   it first with Bottles → ⋯ → Run Windows Installer…). The name comes from the game folder,
+   skipping build folders such as `Binaries/Win64` or `bin/win64`. The source is itch.io when a
+   folder inside `drive_c` is named for it (the itch app's `itch\apps`, or `Itch Games`), else
+   Direct. Optional arguments are split on spaces, without
    quotes. The game folder becomes the working directory and the profile's game folder
    (`gameRoot`). SteamVR games still need OpenComposite from the profile editor; native OpenXR
    games do not. It is the same profile as `basaltctl profile add`.

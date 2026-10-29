@@ -28,8 +28,9 @@ All notable changes to BasaltVR are documented here.
 - The session log can be saved to a file, and every metric sample of a session exported as CSV.
 - **Add Game…** in the Library toolbar makes a launch profile for a Windows game from GOG, itch.io,
   or any installer, without `basaltctl profile add`. Choose a bottle and the game's `.exe` in its
-  `drive_c`; the name comes from the game folder, itch.io is detected from the path, and the
-  game folder becomes the profile's working directory and `gameRoot`. Profile names now fold
+  `drive_c`; the name comes from the game folder (build folders such as `Binaries/Win64` or
+  `bin/win64` are skipped), itch.io is detected from a folder named `itch` inside `drive_c`, and the
+  `.exe` folder becomes the profile's working directory and `gameRoot`. Profile names now fold
   accents and drop other non-ASCII letters, so `basaltctl` accepts every name the app creates.
 
 ### Changed

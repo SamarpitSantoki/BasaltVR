@@ -11,6 +11,19 @@ final class ManualGameTests: XCTestCase {
             "/bottles/pcvr/prefix/drive_c/Launcher.exe")), "Launcher")
     }
 
+    func testSkipsBuildFoldersInTheSuggestedName() {
+        func name(_ path: String) -> String {
+            ManualGame.suggestedName(for: URL(fileURLWithPath: "/bottles/pcvr/prefix/drive_c/" + path))
+        }
+        XCTAssertEqual(name("Games/Foo/Binaries/Win64/Foo-Win64-Shipping.exe"), "Foo")
+        XCTAssertEqual(name("Games/Half-Life Alyx/game/bin/win64/hlvr.exe"), "Half-Life Alyx")
+        XCTAssertEqual(name("SkyrimVR/SkyrimVR.exe"), "SkyrimVR")
+        XCTAssertEqual(name("Some Game/x64/Release/game.exe"), "Some Game")
+        // Only build and install folders up to drive_c: use the exe's name.
+        XCTAssertEqual(name("Program Files/bin/Tool.exe"), "Tool")
+        XCTAssertEqual(name("bin/win64/Tool.exe"), "Tool")
+    }
+
     func testOnlyAcceptsExecutablesInstalledInThePrefix() throws {
         let temporary = try temporaryDirectory()
         let prefix = temporary.appendingPathComponent("pcvr/prefix", isDirectory: true)
@@ -46,6 +59,13 @@ final class ManualGameTests: XCTestCase {
             "/p/drive_c/Itch Games/Some Game/game.exe")), .itch)
         XCTAssertEqual(ManualGame.inferredSource(for: URL(fileURLWithPath:
             "/p/drive_c/GOG Games/Some Game/game.exe")), .direct)
+        // Only the path inside drive_c counts, and only a folder named itch.
+        XCTAssertEqual(ManualGame.inferredSource(for: URL(fileURLWithPath:
+            "/Users/mitchell/Bottles/itch/prefix/drive_c/GOG Games/Some Game/game.exe")), .direct)
+        for folder in ["Twitch", "Glitch", "Switch Games", "Pitch Black"] {
+            XCTAssertEqual(ManualGame.inferredSource(for: URL(fileURLWithPath:
+                "/p/drive_c/\(folder)/Some Game/game.exe")), .direct, folder)
+        }
     }
 
     func testSplitsArgumentsOnWhitespace() {

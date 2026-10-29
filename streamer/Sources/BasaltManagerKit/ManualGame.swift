@@ -4,14 +4,18 @@ import BasaltBottleKit
 /// Rules for the Library's Add Game sheet: a Windows game from GOG, itch.io,
 /// or any installer, chosen by hand from a folder in a Basalt bottle.
 public enum ManualGame {
-    /// "Some Game" from `…/drive_c/GOG Games/Some Game/game.exe`. An exe
-    /// directly in drive_c has no game folder, so it gives its own name.
+    /// "Some Game" from `…/drive_c/GOG Games/Some Game/game.exe`, and also
+    /// from `…/Some Game/Binaries/Win64/Game-Win64-Shipping.exe` or
+    /// `…/Some Game/game/bin/win64/game.exe`: build folders are skipped. An
+    /// exe with no game folder above it gives its own name.
     public static func suggestedName(for executable: URL) -> String {
-        let folder = executable.deletingLastPathComponent().lastPathComponent
-        if folder.isEmpty || folder == "/" || folder.lowercased() == "drive_c" {
-            return executable.deletingPathExtension().lastPathComponent
+        for folder in foldersInDriveC(of: executable).reversed() {
+            let name = folder.lowercased()
+            if buildFolders.contains(name) { continue }
+            if installFolders.contains(name) { break }
+            return folder
         }
-        return folder
+        return executable.deletingPathExtension().lastPathComponent
     }
 
     /// The game is installed in the bottle: the file is under the prefix's
@@ -31,14 +35,42 @@ public enum ManualGame {
             for: URL(fileURLWithPath: path), prefix: prefix.resolvingSymlinksInPath())
     }
 
-    /// itch.io when the path says so (the itch app installs to `…\itch\apps`).
+    /// itch.io when a folder inside drive_c is named for it: the itch app
+    /// installs to `…\itch\apps`, and "Itch Games" counts too. Only the
+    /// Windows path is read, so a Mac user or folder named "mitchell",
+    /// "Twitch", or "Switch" does not count.
     public static func inferredSource(for executable: URL) -> LaunchSource {
-        executable.path.localizedCaseInsensitiveContains("itch") ? .itch : .direct
+        let isItch = foldersInDriveC(of: executable).contains { folder in
+            folder.lowercased().split(whereSeparator: { !$0.isLetter }).first == "itch"
+        }
+        return isItch ? .itch : .direct
     }
 
     /// Space-separated arguments. Quotes are not parsed.
     public static func arguments(from text: String) -> [String] {
         text.split(whereSeparator: \.isWhitespace).map(String.init)
+    }
+
+    /// Folders an Unreal, Source, or other engine puts between the game
+    /// folder and its exe.
+    private static let buildFolders: Set<String> = [
+        "bin", "bin32", "bin64", "binaries", "win32", "win64", "x86", "x64",
+        "x86_64", "amd64", "game", "release", "shipping",
+    ]
+
+    /// Folders that hold many games, so they never name one.
+    private static let installFolders: Set<String> = [
+        "program files", "program files (x86)", "gog games", "games", "apps",
+    ]
+
+    /// The folders between drive_c and the exe, outermost first. Without a
+    /// drive_c in the path, every folder above the exe.
+    private static func foldersInDriveC(of executable: URL) -> [String] {
+        let folders = Array(executable.deletingLastPathComponent().pathComponents.dropFirst())
+        guard let driveC = folders.lastIndex(where: { $0.lowercased() == "drive_c" }) else {
+            return folders
+        }
+        return Array(folders[(driveC + 1)...])
     }
 
     private static func driveC(of prefix: URL) -> URL {
